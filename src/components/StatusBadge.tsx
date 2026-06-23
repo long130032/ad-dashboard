@@ -2,7 +2,7 @@ const MAP: Record<string, string> = {
   // 项目状态
   主力: 'bg-ok/10 text-ok',
   潜力: 'bg-brand/10 text-brand',
-  需关注: 'bg-risk/10 text-risk',
+  要排查: 'bg-risk/10 text-risk',
   低消耗: 'bg-muted/10 text-muted',
   问题: 'bg-bad/10 text-bad',
   // 账户问题类型(5类)

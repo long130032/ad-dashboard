@@ -6,7 +6,7 @@ import { byDimension, derive } from './metrics'
 import { classifyAccounts, inferTargets } from './diagnose'
 import { projectStatus } from './projectStatus'
 import { DEFAULTS } from './config'
-import { groupBy, n0, sumCol } from './agg'
+import { groupBy, n0, safe, sumCol } from './agg'
 
 function pick(r: Row, cols: string[]): Row {
   const o: Row = {}
@@ -153,9 +153,75 @@ export function buildAccounts(优化师?: string, 项目?: string, 媒体?: stri
   return { total: acc.length, counts, rows: acc.map((r) => pick(r, cols)) }
 }
 
+/** 每项目按天趋势:逐日消耗序列 + 「比上一段」(范围内天数对半切,后半 vs 前半)。
+ *  无「按天」表时返回空 Map(各项目趋势字段降级为 null)。按天表无媒体维度,只按优化师+日期过滤。 */
+function projectTrends(优化师?: string, 起始?: string, 截止?: string) {
+  const out = new Map<string, { spark: number[]; 消耗变化: number | null; cpa变化: number | null }>()
+  const day = getTables()['账户按天']
+  if (!day) return out
+  let rows = day.filter((r) => !优化师 || r['优化师'] === 优化师)
+  if (起始 && 截止) rows = rows.filter((r) => {
+    const t = String(r['时间'] ?? '')
+    return t >= 起始 && t <= 截止
+  })
+  for (const [proj, g] of groupBy(rows, '创量项目')) {
+    const days = groupBy(g, '时间')
+      .map(([时间, d]) => ({ 时间: String(时间), 消耗: sumCol(d, '消耗'), 转化: sumCol(d, '转化数') }))
+      .sort((a, b) => a.时间.localeCompare(b.时间))
+    const spark = days.map((d) => d.消耗)
+    // 对半切:前半 / 后半
+    const mid = Math.floor(days.length / 2)
+    const 前 = days.slice(0, mid)
+    const 后 = days.slice(mid)
+    const sum = (arr: typeof days, k: '消耗' | '转化') => arr.reduce((s, d) => s + d[k], 0)
+    const c前 = sum(前, '消耗'), c后 = sum(后, '消耗')
+    const t前 = sum(前, '转化'), t后 = sum(后, '转化')
+    const cpa前 = safe(c前, t前), cpa后 = safe(c后, t后)
+    out.set(String(proj), {
+      spark,
+      消耗变化: c前 ? c后 / c前 - 1 : null,
+      cpa变化: cpa前 && cpa后 ? cpa后 / cpa前 - 1 : null,
+    })
+  }
+  return out
+}
+
 export function buildProjects(优化师?: string, 媒体?: string, 起始?: string, 截止?: string) {
   const acc = filterRows(enrichedAccounts(起始, 截止), { 优化师, 媒体 })
-  return { rows: projectStatus(acc) }
+  const trends = projectTrends(优化师, 起始, 截止)
+
+  const rows = projectStatus(acc).map((r) => {
+    const name = String(r['创量项目'])
+    const sub = acc.filter((x) => x['创量项目'] === name)
+    const 构成: Record<string, number> = {}
+    for (const [类型, s] of groupBy(sub, '问题类型')) 构成[String(类型)] = s.length
+    const t = trends.get(name)
+    return {
+      ...r,
+      主要在投: mode(sub.filter((x) => n0(x['转化数']) > 0).map((x) => x['转化目标'])),
+      构成,
+      spark: t?.spark ?? null,
+      消耗变化: t?.消耗变化 ?? null,
+      cpa变化: t?.cpa变化 ?? null,
+    }
+  })
+
+  // 整盘 KPI
+  const 总消耗 = sumCol(acc, '消耗')
+  const 总白花 = sumCol(acc, '浪费金额')
+  const top3 = rows.slice(0, 3).reduce((s, r) => s + r.消耗, 0) // rows 已按消耗降序
+  const 成本变贵项目数 = rows.filter((r) => (r.cpa变化 ?? 0) > 0.1).length
+  const summary = {
+    在投项目数: rows.filter((r) => r.消耗 > 0).length,
+    总消耗,
+    总白花,
+    白花比例: 总消耗 ? 总白花 / 总消耗 : null,
+    集中度Top3: 总消耗 ? top3 / 总消耗 : null,
+    成本变贵项目数,
+    偏高线: DEFAULTS.项目白花钱偏高线,
+    有趋势: trends.size > 0,
+  }
+  return { rows, summary }
 }
 
 export function buildTeam(项目?: string, 媒体?: string, 起始?: string, 截止?: string) {

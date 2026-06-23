@@ -13,10 +13,12 @@ export function DataTable<T>({
   cols,
   rows,
   initialSort,
+  onRowClick,
 }: {
   cols: Col<T>[]
   rows: T[]
   initialSort?: { key: string; dir: 'asc' | 'desc' }
+  onRowClick?: (r: T) => void
 }) {
   const [sort, setSort] = useState(initialSort)
 
@@ -60,7 +62,11 @@ export function DataTable<T>({
         </thead>
         <tbody>
           {sorted.map((r, i) => (
-            <tr key={i} className="border-b border-line/60 hover:bg-canvas/60">
+            <tr
+              key={i}
+              onClick={onRowClick ? () => onRowClick(r) : undefined}
+              className={`border-b border-line/60 hover:bg-canvas/60 ${onRowClick ? 'cursor-pointer' : ''}`}
+            >
               {cols.map((c) => (
                 <td
                   key={c.key}

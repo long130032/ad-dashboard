@@ -6,6 +6,8 @@ export const DEFAULTS = {
   CPA偏高_最小转化量: 10,
   // 同项目内 CPA 超基准这么多倍算偏高
   CPA偏高_倍数: 1.5,
+  // 项目「白花钱比例」超此线算偏高 → 状态判定标「要排查」、分布图/明细标红
+  项目白花钱偏高线: 0.15,
 }
 
 export type Config = typeof DEFAULTS
