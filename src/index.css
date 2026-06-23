@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  /* 中性灰阶 */
+  --color-canvas: #f7f8fa;
+  --color-ink: #0f1729;
+  --color-muted: #64748b;
+  --color-faint: #94a3b8;
+  --color-line: #eceef2;
+  /* 品牌 */
+  --color-brand: #6d5cf5;
+  --color-brand-soft: #eef0fe;
+  /* 语义色(现代化、克制) */
+  --color-ok: #10b981;
+  --color-warn: #f59e0b;
+  --color-risk: #f97316;
+  --color-bad: #ef4444;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}

@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 真实公司投放数据,绝不入公开仓库(本地保留供测试用)
+数据样本/
+
+# 内部决策/构图文档,含聚合业务数字,不入公开仓库
+reference/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 口径测试依赖本地 数据样本/,属本地验证工具,不入公开仓库
+src/compute/kou_jing.test.ts
