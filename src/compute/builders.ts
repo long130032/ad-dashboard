@@ -4,7 +4,6 @@ import type { Row, Cell } from './types'
 import { getTables } from './store'
 import { byDimension, derive } from './metrics'
 import { classifyAccounts, inferTargets } from './diagnose'
-import { projectStatus } from './projectStatus'
 import { DEFAULTS } from './config'
 import { groupBy, n0, safe, sumCol } from './agg'
 
@@ -153,10 +152,9 @@ export function buildAccounts(优化师?: string, 项目?: string, 媒体?: stri
   return { total: acc.length, counts, rows: acc.map((r) => pick(r, cols)) }
 }
 
-/** 每项目按天趋势:逐日消耗序列 + 「比上一段」(范围内天数对半切,后半 vs 前半)。
- *  无「按天」表时返回空 Map(各项目趋势字段降级为 null)。按天表无媒体维度,只按优化师+日期过滤。 */
-function projectTrends(优化师?: string, 起始?: string, 截止?: string) {
-  const out = new Map<string, { spark: number[]; 消耗变化: number | null; cpa变化: number | null }>()
+/** 每项目逐日消耗序列(主表迷你走势用)。无「按天」表 → 空 Map。按天表无媒体维度,只按优化师+日期过滤。 */
+function projectSparks(优化师?: string, 起始?: string, 截止?: string): Map<string, number[]> {
+  const out = new Map<string, number[]>()
   const day = getTables()['账户按天']
   if (!day) return out
   let rows = day.filter((r) => !优化师 || r['优化师'] === 优化师)
@@ -165,63 +163,182 @@ function projectTrends(优化师?: string, 起始?: string, 截止?: string) {
     return t >= 起始 && t <= 截止
   })
   for (const [proj, g] of groupBy(rows, '创量项目')) {
-    const days = groupBy(g, '时间')
-      .map(([时间, d]) => ({ 时间: String(时间), 消耗: sumCol(d, '消耗'), 转化: sumCol(d, '转化数') }))
+    const series = groupBy(g, '时间')
+      .map(([时间, d]) => ({ 时间: String(时间), 消耗: sumCol(d, '消耗') }))
       .sort((a, b) => a.时间.localeCompare(b.时间))
-    const spark = days.map((d) => d.消耗)
-    // 对半切:前半 / 后半
-    const mid = Math.floor(days.length / 2)
-    const 前 = days.slice(0, mid)
-    const 后 = days.slice(mid)
-    const sum = (arr: typeof days, k: '消耗' | '转化') => arr.reduce((s, d) => s + d[k], 0)
-    const c前 = sum(前, '消耗'), c后 = sum(后, '消耗')
-    const t前 = sum(前, '转化'), t后 = sum(后, '转化')
-    const cpa前 = safe(c前, t前), cpa后 = safe(c后, t后)
-    out.set(String(proj), {
-      spark,
-      消耗变化: c前 ? c后 / c前 - 1 : null,
-      cpa变化: cpa前 && cpa后 ? cpa后 / cpa前 - 1 : null,
-    })
+      .map((d) => d.消耗)
+    out.set(String(proj), series)
   }
   return out
 }
 
+/** 0转化消耗 = 一组账户里「转化数==0」者的消耗之和。中性口径,不依赖 CPA 基准。 */
+function zeroConvSpend(rows: Row[]): number {
+  let s = 0
+  for (const r of rows) if (n0(r['转化数']) === 0) s += n0(r['消耗'])
+  return s
+}
+
+/** 逐项目中性事实行。基于 enrichedAccounts 聚合,数值来自 byDimension/derive。 */
+function projectRows(acc: Row[], sparks: Map<string, number[]>) {
+  const dims = byDimension(acc, '创量项目') // 已按消耗降序
+  return dims.map((d) => {
+    const name = String(d['创量项目'])
+    const sub = acc.filter((r) => r['创量项目'] === name)
+    const 零转化消耗 = zeroConvSpend(sub)
+    const 媒体数 = new Set(
+      sub.map((r) => r['媒体']).filter((m): m is string => typeof m === 'string' && m !== ''),
+    ).size
+    return {
+      ...d,
+      创量项目: name,
+      零转化消耗,
+      零转化占比: d.消耗 ? 零转化消耗 / d.消耗 : null,
+      媒体数,
+      是0转化: d.消耗 > 0 && d.转化 === 0,
+      低样本: d.消耗 > 0 && (d.转化 < DEFAULTS.低样本_最小转化 || d.点击 < DEFAULTS.低样本_最小点击),
+      spark: sparks.get(name) ?? null,
+    }
+  })
+}
+
+const ZERO_BUCKETS = [
+  { 名: '0-5%', lo: 0, hi: 0.05 },
+  { 名: '5-10%', lo: 0.05, hi: 0.1 },
+  { 名: '10-20%', lo: 0.1, hi: 0.2 },
+  { 名: '20-40%', lo: 0.2, hi: 0.4 },
+  { 名: '40%+', lo: 0.4, hi: Infinity },
+]
+
 export function buildProjects(优化师?: string, 媒体?: string, 起始?: string, 截止?: string) {
   const acc = filterRows(enrichedAccounts(起始, 截止), { 优化师, 媒体 })
-  const trends = projectTrends(优化师, 起始, 截止)
+  const sparks = projectSparks(优化师, 起始, 截止)
+  const rows = projectRows(acc, sparks)
 
-  const rows = projectStatus(acc).map((r) => {
-    const name = String(r['创量项目'])
-    const sub = acc.filter((x) => x['创量项目'] === name)
-    const 构成: Record<string, number> = {}
-    for (const [类型, s] of groupBy(sub, '问题类型')) 构成[String(类型)] = s.length
-    const t = trends.get(name)
+  const 总消耗 = sumCol(acc, '消耗')
+  const 总零转化消耗 = rows.reduce((s, r) => s + r.零转化消耗, 0)
+  const spending = rows.filter((r) => r.消耗 > 0)
+  const dAll = derive(acc)
+
+  // ⑤ 0转化消耗占比分桶(只统计有消耗项目)
+  const buckets = ZERO_BUCKETS.map((b) => {
+    const inB = spending.filter((r) => {
+      const v = r.零转化占比 ?? 0
+      return v >= b.lo && (b.hi === Infinity || v < b.hi)
+    })
     return {
-      ...r,
-      主要在投: mode(sub.filter((x) => n0(x['转化数']) > 0).map((x) => x['转化目标'])),
-      构成,
-      spark: t?.spark ?? null,
-      消耗变化: t?.消耗变化 ?? null,
-      cpa变化: t?.cpa变化 ?? null,
+      区间: b.名,
+      项目数: inB.length,
+      消耗: inB.reduce((s, r) => s + r.消耗, 0),
+      零转化消耗: inB.reduce((s, r) => s + r.零转化消耗, 0),
+      top5: [...inB]
+        .sort((a, b2) => (b2.零转化占比 ?? 0) - (a.零转化占比 ?? 0))
+        .slice(0, 5)
+        .map((r) => ({ 创量项目: r.创量项目, 零转化占比: r.零转化占比, 消耗: r.消耗 })),
     }
   })
 
-  // 整盘 KPI
-  const 总消耗 = sumCol(acc, '消耗')
-  const 总白花 = sumCol(acc, '浪费金额')
-  const top3 = rows.slice(0, 3).reduce((s, r) => s + r.消耗, 0) // rows 已按消耗降序
-  const 成本变贵项目数 = rows.filter((r) => (r.cpa变化 ?? 0) > 0.1).length
+  const matrix = buildMatrix(acc, rows)
+
   const summary = {
-    在投项目数: rows.filter((r) => r.消耗 > 0).length,
     总消耗,
-    总白花,
-    白花比例: 总消耗 ? 总白花 / 总消耗 : null,
-    集中度Top3: 总消耗 ? top3 / 总消耗 : null,
-    成本变贵项目数,
-    偏高线: DEFAULTS.项目白花钱偏高线,
-    有趋势: trends.size > 0,
+    总零转化消耗,
+    零转化占比: 总消耗 ? 总零转化消耗 / 总消耗 : null,
+    在投项目数: spending.length,
+    '0转化项目数': rows.filter((r) => r.是0转化).length,
+    CTR: dAll.CTR,
+    CPC: dAll.CPC,
+    有趋势: sparks.size > 0,
+    有媒体: !!getTables()['项目报表'],
+    低样本阈值: { 转化: DEFAULTS.低样本_最小转化, 点击: DEFAULTS.低样本_最小点击 },
   }
-  return { rows, summary }
+  return { rows, summary, buckets, matrix }
+}
+
+/** ⑥ 项目×媒体 矩阵:行=Top20 项目,列=按消耗降序媒体;单元格 消耗/0转化消耗/占比/展示/点击/CTR/CPC。
+ *  无「项目报表」(无媒体归属)→ 返回 null。 */
+function buildMatrix(acc: Row[], rows: ReturnType<typeof projectRows>) {
+  if (!getTables()['项目报表']) return null
+  const topProjects = rows.filter((r) => r.消耗 > 0).slice(0, 20).map((r) => r.创量项目)
+  const projSet = new Set(topProjects)
+  const cellMap = new Map<string, Map<string, { 消耗: number; 零转化消耗: number; 展示: number; 点击: number }>>()
+  const mediaSpend = new Map<string, number>()
+  for (const r of acc) {
+    const proj = String(r['创量项目'] ?? '')
+    const media = r['媒体']
+    if (!projSet.has(proj) || typeof media !== 'string' || media === '') continue
+    const 消耗 = n0(r['消耗'])
+    mediaSpend.set(media, (mediaSpend.get(media) ?? 0) + 消耗)
+    let row = cellMap.get(proj)
+    if (!row) { row = new Map(); cellMap.set(proj, row) }
+    const cell = row.get(media) ?? { 消耗: 0, 零转化消耗: 0, 展示: 0, 点击: 0 }
+    cell.消耗 += 消耗
+    if (n0(r['转化数']) === 0) cell.零转化消耗 += 消耗
+    cell.展示 += n0(r['展示数'])
+    cell.点击 += n0(r['点击数'])
+    row.set(media, cell)
+  }
+  const 媒体列 = [...mediaSpend.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m)
+  const mRows = topProjects.map((proj) => {
+    const row = cellMap.get(proj)
+    const cells: Record<string, { 消耗: number; 零转化消耗: number; 零转化占比: number | null; 展示: number; 点击: number; CTR: number | null; CPC: number | null } | null> = {}
+    for (const m of 媒体列) {
+      const c = row?.get(m)
+      cells[m] = c
+        ? { 消耗: c.消耗, 零转化消耗: c.零转化消耗, 零转化占比: c.消耗 ? c.零转化消耗 / c.消耗 : null, 展示: c.展示, 点击: c.点击, CTR: safe(c.点击, c.展示), CPC: safe(c.消耗, c.点击) }
+        : null
+    }
+    return { 创量项目: proj, cells }
+  })
+  return { 媒体列, rows: mRows }
+}
+
+/** ⑧ 单项目详情(抽屉懒加载):摘要 + 逐日走势 + 媒体构成 + 账户表现分布 + 转化链路。 */
+export function buildProjectDetail(项目名: string, 优化师?: string, 起始?: string, 截止?: string) {
+  const acc = filterRows(enrichedAccounts(起始, 截止), { 优化师 }).filter((r) => r['创量项目'] === 项目名)
+  const d = derive(acc)
+  const 零转化消耗 = zeroConvSpend(acc)
+
+  const 摘要 = {
+    创量项目: 项目名, 消耗: d.消耗, 展示: d.展示, 点击: d.点击, 转化: d.转化, 激活: d.激活,
+    CTR: d.CTR, CPC: d.CPC, CVR: d.CVR, CPA: d.CPA,
+    零转化消耗, 零转化占比: d.消耗 ? 零转化消耗 / d.消耗 : null,
+    账户数: new Set(acc.map((r) => r['账户ID'])).size,
+  }
+
+  // 逐日走势(含日级 0转化消耗)
+  const day = getTables()['账户按天']
+  let days: { 时间: string; 消耗: number; 展示: number; 点击: number; 转化: number; 零转化消耗: number }[] = []
+  if (day) {
+    let dr = day.filter((r) => r['创量项目'] === 项目名 && (!优化师 || r['优化师'] === 优化师))
+    if (起始 && 截止) dr = dr.filter((r) => { const t = String(r['时间'] ?? ''); return t >= 起始 && t <= 截止 })
+    days = groupBy(dr, '时间')
+      .map(([时间, g]) => ({
+        时间: String(时间), 消耗: sumCol(g, '消耗'), 展示: sumCol(g, '展示数'),
+        点击: sumCol(g, '点击数'), 转化: sumCol(g, '转化数'), 零转化消耗: zeroConvSpend(g),
+      }))
+      .sort((a, b) => a.时间.localeCompare(b.时间))
+  }
+
+  // 媒体构成
+  const 媒体构成 = byDimension(acc.filter((r) => typeof r['媒体'] === 'string' && r['媒体'] !== ''), '媒体')
+    .map((m) => ({ ...m, 零转化消耗: zeroConvSpend(acc.filter((r) => r['媒体'] === m['媒体'])) }))
+
+  // 账户表现分布(互斥 3 组,中性命名)
+  const 账户分布 = { 有消耗有转化: { 账户数: 0, 消耗: 0 }, 有消耗0转化: { 账户数: 0, 消耗: 0 }, '0消耗': { 账户数: 0, 消耗: 0 } }
+  for (const r of acc) {
+    const c = n0(r['消耗']), t = n0(r['转化数'])
+    const k = c === 0 ? '0消耗' : t > 0 ? '有消耗有转化' : '有消耗0转化'
+    账户分布[k].账户数++
+    账户分布[k].消耗 += c
+  }
+
+  // 转化链路(展示/点击齐才给)
+  const 链路 = d.展示 > 0 && d.点击 > 0
+    ? { 展示: d.展示, 点击: d.点击, 转化: d.转化, 激活: d.激活, CTR: d.CTR, 点击转化率: safe(d.转化, d.点击), 转化激活率: safe(d.激活, d.转化) }
+    : null
+
+  return { 摘要, days, 媒体构成, 账户分布, 链路 }
 }
 
 export function buildTeam(项目?: string, 媒体?: string, 起始?: string, 截止?: string) {
@@ -283,6 +400,7 @@ export function buildTrend(优化师?: string, 项目?: string, 起始?: string,
         激活,
         点击,
         展示,
+        零转化消耗: zeroConvSpend(g), // 当日「转化数==0」账户的消耗(0转化消耗占比走势用)
         CPA: 转化 ? 消耗 / 转化 : null,
         CPC: 点击 ? 消耗 / 点击 : null,
       }

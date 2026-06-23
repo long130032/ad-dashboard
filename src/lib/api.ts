@@ -5,6 +5,7 @@ import {
   buildOverview,
   buildAccounts,
   buildProjects,
+  buildProjectDetail,
   buildTeam,
   buildMedia,
   buildTrend,
@@ -34,6 +35,9 @@ export async function api<T>(
       break
     case 'projects':
       out = buildProjects(p.优化师, p.媒体, p.起始, p.截止)
+      break
+    case 'projectDetail':
+      out = buildProjectDetail(p.项目名 ?? '', p.优化师, p.起始, p.截止)
       break
     case 'team':
       out = buildTeam(p.项目, p.媒体, p.起始, p.截止)
