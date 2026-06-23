@@ -27,22 +27,22 @@ export async function api<T>(
       out = buildFilters()
       break
     case 'overview':
-      out = buildOverview(p.优化师, p.项目, p.媒体)
+      out = buildOverview(p.优化师, p.项目, p.媒体, p.起始, p.截止)
       break
     case 'accounts':
-      out = buildAccounts(p.优化师, p.项目, p.媒体, p.问题类型)
+      out = buildAccounts(p.优化师, p.项目, p.媒体, p.问题类型, p.起始, p.截止)
       break
     case 'projects':
-      out = buildProjects(p.优化师, p.媒体)
+      out = buildProjects(p.优化师, p.媒体, p.起始, p.截止)
       break
     case 'team':
-      out = buildTeam(p.项目, p.媒体)
+      out = buildTeam(p.项目, p.媒体, p.起始, p.截止)
       break
     case 'media':
       out = buildMedia()
       break
     case 'trend':
-      out = buildTrend(p.优化师, p.项目)
+      out = buildTrend(p.优化师, p.项目, p.起始, p.截止)
       break
     case 'config':
       out = buildConfig()

@@ -39,6 +39,8 @@ export function Accounts() {
     项目: filters.项目,
     媒体: filters.媒体,
     问题类型: tab === '全部' ? undefined : tab,
+    起始: filters.起始,
+    截止: filters.截止,
   })
 
   const cols: Col<Acct>[] = [

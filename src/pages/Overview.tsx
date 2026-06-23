@@ -80,7 +80,7 @@ const HEALTH_COLOR: Record<string, string> = {
 export function Overview() {
   const { filters } = useFilters()
   const { data, loading } = useApi<Overview>('overview', filters)
-  const { data: trend } = useApi<Trend>('trend', { 优化师: filters.优化师, 项目: filters.项目 })
+  const { data: trend } = useApi<Trend>('trend', { 优化师: filters.优化师, 项目: filters.项目, 起始: filters.起始, 截止: filters.截止 })
 
   if (loading || !data) return <Loading />
   const k = data.kpi
@@ -91,7 +91,7 @@ export function Overview() {
     <div className="space-y-4">
       {/* KPI 第一行:基础投放指标 */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-        <KpiCard label="消耗" value={wan(k.消耗)} sub="整段累计" spark={rows.map((r) => r.消耗)} sparkColor={CHART.brand} />
+        <KpiCard label="消耗" value={wan(k.消耗)} sub={filters.起始 ? `${filters.起始}~${filters.截止}` : '整段累计'} spark={rows.map((r) => r.消耗)} sparkColor={CHART.brand} />
         <KpiCard label="曝光量" value={num(k.曝光)} />
         <KpiCard label="点击量" value={num(k.点击)} />
         <KpiCard label="点击率 CTR" value={pct(k.CTR, 2)} />

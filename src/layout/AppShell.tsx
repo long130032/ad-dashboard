@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useFilters, type FilterKey } from '../store/filters'
+import { DateFilter } from './DateFilter'
 
 const NAV_MAIN = [
   { to: '/', label: '总览', end: true },
@@ -50,7 +51,7 @@ function FilterSelect({ k }: { k: FilterKey }) {
 
 export function AppShell() {
   const { meta, filters, clear } = useFilters()
-  const active = Object.values(filters).some(Boolean)
+  const active = !!(filters.优化师 || filters.项目 || filters.媒体)
 
   return (
     <div className="flex h-full">
@@ -79,6 +80,7 @@ export function AppShell() {
           <FilterSelect k="优化师" />
           <FilterSelect k="项目" />
           <FilterSelect k="媒体" />
+          <DateFilter />
           {active && (
             <button onClick={clear} className="text-[13px] text-muted hover:text-ink px-2 transition-colors">
               清除

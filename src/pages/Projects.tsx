@@ -28,6 +28,8 @@ export function Projects() {
   const { data, loading } = useApi<{ rows: Proj[] }>('projects', {
     优化师: filters.优化师,
     媒体: filters.媒体,
+    起始: filters.起始,
+    截止: filters.截止,
   })
   if (loading || !data) return <Loading />
 

@@ -22,7 +22,7 @@ type Row = {
 
 export function Team() {
   const { filters } = useFilters()
-  const { data, loading } = useApi<{ rows: Row[] }>('team', { 项目: filters.项目, 媒体: filters.媒体 })
+  const { data, loading } = useApi<{ rows: Row[] }>('team', { 项目: filters.项目, 媒体: filters.媒体, 起始: filters.起始, 截止: filters.截止 })
   if (loading || !data) return <Loading />
   const 总 = data.rows.reduce((s, r) => s + r.消耗, 0)
   const 总激活 = data.rows.reduce((s, r) => s + (r.激活 || 0), 0)

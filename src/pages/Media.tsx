@@ -38,6 +38,7 @@ export function Media() {
 
   return (
     <div className="space-y-4">
+      <div className="text-[12px] text-faint">媒体数据为整段口径,不随顶部日期筛选变化。</div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {data.rows.map((r) => (
           <StatTile
