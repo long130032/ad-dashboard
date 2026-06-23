@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useFilters, type FilterKey } from '../store/filters'
 import { DateFilter } from './DateFilter'
 
@@ -52,6 +52,8 @@ function FilterSelect({ k }: { k: FilterKey }) {
 export function AppShell() {
   const { meta, filters, clear } = useFilters()
   const active = !!(filters.优化师 || filters.项目 || filters.媒体)
+  // 媒体页:取数不吃任何筛选,整条筛选栏在这页禁用置灰,避免"选了没反应"的误导
+  const onMedia = useLocation().pathname === '/media'
 
   return (
     <div className="flex h-full">
@@ -77,15 +79,21 @@ export function AppShell() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* 顶部筛选栏 */}
         <header className="h-14 shrink-0 bg-white border-b border-line flex items-center gap-2 px-6">
-          <FilterSelect k="优化师" />
-          <FilterSelect k="项目" />
-          <FilterSelect k="媒体" />
-          <DateFilter />
-          {active && (
-            <button onClick={clear} className="text-[13px] text-muted hover:text-ink px-2 transition-colors">
-              清除
-            </button>
-          )}
+          <fieldset
+            disabled={onMedia}
+            title={onMedia ? '媒体分析按整个时间段统计,筛选在这页不生效' : undefined}
+            className={`flex items-center gap-2 border-0 p-0 m-0 min-w-0 ${onMedia ? 'opacity-50' : ''}`}
+          >
+            <FilterSelect k="优化师" />
+            <FilterSelect k="项目" />
+            <FilterSelect k="媒体" />
+            <DateFilter />
+            {active && (
+              <button onClick={clear} className="text-[13px] text-muted hover:text-ink px-2 transition-colors">
+                清除
+              </button>
+            )}
+          </fieldset>
           <div className="ml-auto flex items-center gap-1.5 text-[12px] text-muted">
             {meta.has_data ? (
               <>
