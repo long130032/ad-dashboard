@@ -43,7 +43,7 @@ export async function api<T>(
       out = buildTeam(p.项目, p.媒体, p.起始, p.截止)
       break
     case 'media':
-      out = buildMedia()
+      out = buildMedia(p.优化师, p.项目, p.媒体)
       break
     case 'trend':
       out = buildTrend(p.优化师, p.项目, p.起始, p.截止)

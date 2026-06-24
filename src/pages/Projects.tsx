@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Bar,
-  BarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
+  LabelList,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Scatter,
@@ -18,7 +20,6 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { Card } from '../components/Card'
 import { DataTable, type Col } from '../components/DataTable'
-import { StatTile } from '../components/StatTile'
 import { Sparkline } from '../components/Sparkline'
 import { useApi } from '../lib/useApi'
 import { dec, money, num, pct, wan } from '../lib/format'
@@ -42,6 +43,7 @@ type Proj = {
   零转化占比: number | null
   账户数: number
   媒体数: number
+  主投媒体: string | null
   是0转化: boolean
   低样本: boolean
   spark: number[] | null
@@ -57,40 +59,70 @@ type Summary = {
   有趋势: boolean
   有媒体: boolean
 }
-type Bucket = { 区间: string; 项目数: number; 消耗: number; 零转化消耗: number; top5: { 创量项目: string; 零转化占比: number | null; 消耗: number }[] }
-type MatrixCell = { 消耗: number; 零转化消耗: number; 零转化占比: number | null; 展示: number; 点击: number; CTR: number | null; CPC: number | null } | null
-type Matrix = { 媒体列: string[]; rows: { 创量项目: string; cells: Record<string, MatrixCell> }[] } | null
-type Resp = { rows: Proj[]; summary: Summary; buckets: Bucket[]; matrix: Matrix }
+type Bucket = { 区间: string; 项目数: number; 消耗: number; 零转化消耗: number }
+type Resp = { rows: Proj[]; summary: Summary; buckets: Bucket[] }
 
-type Day = { 时间: string; 消耗: number; 展示: number; 点击: number; 转化: number; 零转化消耗: number }
-type Detail = {
+type Day = { 时间: string; 消耗: number; 展示: number; 点击: number; 转化: number; 零转化消耗: number; CPC: number | null; CPA: number | null }
+type Peak = { 时间: string; 消耗: number; 贡献: { 项目: string; 消耗: number; 占比: number }[] } | null
+type TrendResp = { rows: Day[]; 峰值: Peak }
+
+type DetailT = {
   摘要: { 创量项目: string; 消耗: number; 展示: number; 点击: number; 转化: number; 激活: number; CTR: number | null; CPC: number | null; CVR: number | null; CPA: number | null; 零转化消耗: number; 零转化占比: number | null; 账户数: number }
-  days: Day[]
+  days: { 时间: string; 消耗: number; 展示: number; 点击: number; 转化: number; 零转化消耗: number }[]
   媒体构成: Record<string, number | string | null>[]
   账户分布: Record<string, { 账户数: number; 消耗: number }>
   链路: { 展示: number; 点击: number; 转化: number; 激活: number; CTR: number | null; 点击转化率: number | null; 转化激活率: number | null } | null
 }
 
-// ---------- 颜色 ----------
-const C_有效 = CHART.accent // 青蓝
-const C_零转化 = '#f87171' // 浅红
-const C_整盘 = '#94a3b8'
+// ---------- 颜色 / 工具 ----------
+const C_有效 = CHART.accent // 青蓝(有效消耗)
+const C_零转化 = '#f87171' // 浅红(0转化消耗)
+const C_均线 = '#2563eb' // 蓝(7日均线)
+const C_叠加 = '#ef4444' // 红(0转化占比 / 叠加线)
+const C_柱 = '#dbe3fb' // 浅蓝灰(每日消耗柱)
 const AXIS = { fontSize: 11, fill: CHART.axis }
-const div = (a: number, b: number | null | undefined) => (b ? a / b : null)
-// 0转化占比 → 浅到深红底色(克制)
-const redBg = (p: number | null) => `rgba(239,68,68,${Math.min(0.06 + (p ?? 0) * 0.85, 0.55)})`
-
-// ---------- 走势指标 ----------
-type Metric = { key: string; label: string; calc: (d: Day) => number | null; fmt: (v: number) => string }
 const yuan = (v: number) => '¥' + dec(v)
-const OVERVIEW_METRICS: Metric[] = [
-  { key: '消耗', label: '消耗', calc: (d) => d.消耗, fmt: wan },
-  { key: '展示', label: '展示', calc: (d) => d.展示, fmt: num },
-  { key: '点击', label: '点击', calc: (d) => d.点击, fmt: num },
-  { key: 'CTR', label: 'CTR', calc: (d) => { const v = div(d.点击, d.展示); return v == null ? null : v * 100 }, fmt: (v) => v.toFixed(2) + '%' },
-  { key: 'CPC', label: 'CPC', calc: (d) => div(d.消耗, d.点击), fmt: yuan },
-  { key: '0转化占比', label: '0转化消耗占比', calc: (d) => { const v = div(d.零转化消耗, d.消耗); return v == null ? null : v * 100 }, fmt: (v) => v.toFixed(1) + '%' },
+const div = (a: number, b: number | null | undefined) => (b ? a / b : null)
+const md = (t: string) => (t.length >= 10 ? t.slice(5) : t) // yyyy-mm-dd → mm-dd
+
+// 0转化占比分层(5 档,带配色)。卡片与区间归属共用。
+const BUCKETS = [
+  { 名: '0-5%', lo: 0, hi: 0.05, color: '#10b981', soft: '#ecfdf5' },
+  { 名: '5-10%', lo: 0.05, hi: 0.1, color: '#3b82f6', soft: '#eff6ff' },
+  { 名: '10-20%', lo: 0.1, hi: 0.2, color: '#f59e0b', soft: '#fffbeb' },
+  { 名: '20-40%', lo: 0.2, hi: 0.4, color: '#fb7185', soft: '#fff1f2' },
+  { 名: '40%+', lo: 0.4, hi: Infinity, color: '#ef4444', soft: '#fef2f2' },
 ]
+const bucketOf = (p: number | null) => {
+  const v = p ?? 0
+  return (BUCKETS.find((b) => v >= b.lo && (b.hi === Infinity || v < b.hi)) ?? BUCKETS[0]).名
+}
+// 气泡 0转化占比分档色(4 档:绿/蓝/橙/红)
+const zeroColor = (p: number | null) => {
+  const v = p ?? 0
+  return v < 0.05 ? '#10b981' : v < 0.1 ? '#3b82f6' : v < 0.2 ? '#f59e0b' : '#ef4444'
+}
+function quantile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 0
+  if (sorted.length === 1) return sorted[0]
+  const pos = (sorted.length - 1) * q
+  const lo = Math.floor(pos)
+  return sorted[lo] + (sorted[Math.ceil(pos)] - sorted[lo]) * (pos - lo)
+}
+
+// ---------- 走势主指标 / 叠加指标 ----------
+type MainKey = '消耗' | '展示' | '点击'
+type OverKey = '0转化占比' | 'CPC' | 'CTR'
+const MAIN: Record<MainKey, { calc: (d: Day) => number; fmt: (v: number) => string }> = {
+  消耗: { calc: (d) => d.消耗, fmt: wan },
+  展示: { calc: (d) => d.展示, fmt: num },
+  点击: { calc: (d) => d.点击, fmt: num },
+}
+const OVER: Record<OverKey, { calc: (d: Day) => number | null; fmt: (v: number) => string }> = {
+  '0转化占比': { calc: (d) => (d.消耗 ? (d.零转化消耗 / d.消耗) * 100 : null), fmt: (v) => v.toFixed(1) + '%' },
+  CPC: { calc: (d) => div(d.消耗, d.点击), fmt: yuan },
+  CTR: { calc: (d) => (d.展示 ? (d.点击 / d.展示) * 100 : null), fmt: (v) => v.toFixed(2) + '%' },
+}
 
 export function Projects() {
   const { filters, setFilter } = useFilters()
@@ -101,52 +133,70 @@ export function Projects() {
     起始: filters.起始,
     截止: filters.截止,
   })
-  const { data: trend } = useApi<{ rows: Day[] }>('trend', { 优化师: filters.优化师, 起始: filters.起始, 截止: filters.截止 })
+  const { data: trend } = useApi<TrendResp>('trend', { 优化师: filters.优化师, 起始: filters.起始, 截止: filters.截止 })
 
-  const [selected, setSelected] = useState<string | null>(null)
-  const [showConv, setShowConv] = useState(false)
-  const [metricKey, setMetricKey] = useState('消耗')
+  const [selected, setSelected] = useState<string | null>(null) // 选中项目(高亮+抽屉+表定位)
+  const [bucketFilter, setBucketFilter] = useState<string | null>(null) // 底部表的区间筛选
+  const [userBucket, setUserBucket] = useState<string | null>(null) // 用户点选的分层(模块④展示)
 
   if (loading || !data) return <Loading />
-  const { rows, summary, buckets, matrix } = data
-  const drill = (proj: string) => { setFilter('项目', proj); nav('/accounts') }
-  const toggleSelect = (proj: string) => setSelected((s) => (s === proj ? null : proj))
+  const { rows, summary, buckets } = data
+
+  const spending = rows.filter((r) => r.消耗 > 0)
+  // 模块④默认选中:0转化消耗金额最高的区间
+  const defaultBucket = buckets.length
+    ? [...buckets].sort((a, b) => b.零转化消耗 - a.零转化消耗)[0].区间
+    : BUCKETS[0].名
+  const shownBucket = userBucket ?? defaultBucket
+
+  const selectProject = (p: string) => {
+    setSelected((s) => (s === p ? null : p))
+    setBucketFilter(null)
+  }
+  const selectBucket = (b: string) => {
+    setUserBucket(b)
+    setBucketFilter(b)
+    setSelected(null)
+  }
+  const clearFilter = () => {
+    setSelected(null)
+    setBucketFilter(null)
+  }
+  const drill = (proj: string) => {
+    setFilter('项目', proj)
+    nav('/accounts')
+  }
 
   return (
     <div className="space-y-4">
-      {/* ① KPI 概览带 */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <StatTile label="总消耗" value={wan(summary.总消耗)} sub="所选范围内广告消耗" />
-        <StatTile label="0转化消耗" value={money(summary.总零转化消耗)} sub={`占总消耗 ${pct(summary.零转化占比)}`} />
-        <StatTile label="在投项目数" value={num(summary.在投项目数)} sub="本期有消耗项目" />
-        <StatTile label="0转化项目数" value={num(summary['0转化项目数'])} sub="有消耗但无转化" />
-        <StatTile label="整盘流量" value={`${pct(summary.CTR, 2)} CTR`} sub={`CPC ${summary.CPC == null ? '—' : yuan(summary.CPC)}`} />
-      </div>
+      {/* ① 投放变化与质量趋势 */}
+      <TrendModule trend={trend} hasTrend={summary.有趋势} />
 
-      {/* 第一屏:图A 消耗结构 + 图B 流量效率 */}
+      {/* ② 项目消耗结构 + ③ 流量效率定位 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <SpendStructure rows={rows} selected={selected} onSelect={toggleSelect} />
-        <EfficiencyScatter rows={rows} selected={selected} onSelect={toggleSelect} />
+        <SpendStructure rows={spending} selected={selected} onSelect={selectProject} />
+        <EfficiencyScatter rows={spending} selected={selected} onSelect={selectProject} />
       </div>
 
-      {/* 第二屏:图C 走势 */}
-      <TrendCard
-        metrics={OVERVIEW_METRICS}
-        metricKey={metricKey}
-        setMetricKey={setMetricKey}
-        overall={trend?.rows ?? []}
-        selected={selected}
-        hasTrend={summary.有趋势}
+      {/* ④ 0转化占比分层 */}
+      <LayerModule
+        buckets={buckets}
+        rows={spending}
+        shownBucket={shownBucket}
+        onSelectBucket={selectBucket}
+        onSelectProject={selectProject}
       />
 
-      {/* 第三屏:图E 0转化占比分布 */}
-      <DistributionCard buckets={buckets} />
-
-      {/* 第四屏:图F 媒体矩阵 */}
-      {matrix && <MediaMatrix matrix={matrix} selected={selected} onSelect={toggleSelect} />}
-
-      {/* 第五屏:主表 */}
-      <ProjectTable rows={rows} showConv={showConv} setShowConv={setShowConv} onSelect={toggleSelect} hasTrend={summary.有趋势} />
+      {/* 项目明细表 */}
+      <ProjectTable
+        rows={rows}
+        hasTrend={summary.有趋势}
+        hasMedia={summary.有媒体}
+        selected={selected}
+        bucketFilter={bucketFilter}
+        onSelect={selectProject}
+        onClear={clearFilter}
+      />
 
       {/* 右侧抽屉:单项目详情 */}
       {selected && <DetailDrawer 项目名={selected} onClose={() => setSelected(null)} onDrill={drill} />}
@@ -154,60 +204,214 @@ export function Projects() {
   )
 }
 
-// ---------- ② 各项目消耗结构 ----------
-function SpendStructure({ rows, selected, onSelect }: { rows: Proj[]; selected: string | null; onSelect: (p: string) => void }) {
-  const spending = rows.filter((r) => r.消耗 > 0)
-  const top = spending.slice(0, 15)
-  const restSpend = spending.slice(15).reduce((s, r) => s + r.消耗, 0)
-  const rest零 = spending.slice(15).reduce((s, r) => s + r.零转化消耗, 0)
-  const data = top.map((r) => ({ name: r.创量项目, 有效消耗: r.消耗 - r.零转化消耗, 零转化消耗: r.零转化消耗, 消耗: r.消耗, 零转化占比: r.零转化占比 }))
-  if (restSpend > 0) data.push({ name: '其他项目', 有效消耗: restSpend - rest零, 零转化消耗: rest零, 消耗: restSpend, 零转化占比: div(rest零, restSpend) })
+// ============== ① 投放变化与质量趋势 ==============
+function TrendModule({ trend, hasTrend }: { trend: TrendResp | null; hasTrend: boolean }) {
+  const [mainKey, setMainKey] = useState<MainKey>('消耗')
+  const [overKey, setOverKey] = useState<OverKey>('0转化占比')
+
+  if (!hasTrend) {
+    return (
+      <Card title="投放变化与质量趋势">
+        <div className="py-12 text-center text-muted text-[14px]">需上传「按天」账户报表后查看每日趋势</div>
+      </Card>
+    )
+  }
+  const days = trend?.rows ?? []
+  const peak = trend?.峰值 ?? null
+  const main = MAIN[mainKey]
+  const over = OVER[overKey]
+
+  // 图数据:柱=主指标,蓝线=7日均线(主指标),红线=叠加指标(右轴)
+  const mains = days.map((d) => main.calc(d))
+  const chart = days.map((d, i) => {
+    const lo = Math.max(0, i - 6)
+    const win = mains.slice(lo, i + 1)
+    return {
+      时间: md(d.时间),
+      主: mains[i],
+      均线: win.reduce((s, v) => s + v, 0) / win.length,
+      叠加: over.calc(d),
+    }
+  })
+
+  // KPI(固定基于消耗)
+  const 总消耗 = days.reduce((s, d) => s + d.消耗, 0)
+  const 日均 = days.length ? 总消耗 / days.length : 0
+  const last7 = days.slice(-7).reduce((s, d) => s + d.消耗, 0)
+  const prev7 = days.slice(-14, -7).reduce((s, d) => s + d.消耗, 0)
+  const 环比 = prev7 ? last7 / prev7 - 1 : null
 
   return (
-    <Card title="各项目消耗结构" extra={<span className="text-[12px] text-muted">青=有效消耗 · 红=0转化消耗</span>}>
-      <div style={{ height: Math.max(220, data.length * 30) }}>
+    <Card
+      title="投放变化与质量趋势"
+      extra={
+        <div className="flex flex-wrap items-center gap-3 text-[12px]">
+          <Toggle label="主指标" value={mainKey} opts={['消耗', '展示', '点击']} onChange={(v) => setMainKey(v as MainKey)} />
+          <Toggle label="叠加" value={overKey} opts={['0转化占比', 'CPC', 'CTR']} onChange={(v) => setOverKey(v as OverKey)} accent="red" />
+        </div>
+      }
+    >
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+        <Kpi label="周期消耗" value={wan(总消耗)} />
+        <Kpi label="日均消耗" value={wan(日均)} />
+        <Kpi label="峰值日" value={peak ? md(peak.时间) : '—'} sub={peak ? wan(peak.消耗) : undefined} />
+        <Kpi
+          label="近7日环比"
+          value={环比 == null ? '—' : (环比 >= 0 ? '+' : '') + (环比 * 100).toFixed(1) + '%'}
+          tone={环比 == null ? undefined : 环比 >= 0 ? 'up' : 'down'}
+          sub="较前7日"
+        />
+      </div>
+
+      <div className="h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart layout="vertical" data={data} margin={{ top: 4, right: 56, bottom: 4, left: 8 }} barCategoryGap={6}>
-            <CartesianGrid stroke={CHART.grid} horizontal={false} />
-            <XAxis type="number" tickFormatter={(v) => (v / 10000).toFixed(0) + '万'} tick={AXIS} axisLine={false} tickLine={false} />
-            <YAxis type="category" dataKey="name" width={104} tick={{ fontSize: 11, fill: '#334155' }} axisLine={false} tickLine={false}
-              tickFormatter={(v: string) => (v.length > 7 ? v.slice(0, 7) + '…' : v)} />
-            <Tooltip content={<StructTip />} cursor={{ fill: 'rgba(109,92,245,0.05)' }} />
-            <Bar dataKey="有效消耗" stackId="a" fill={C_有效} radius={[3, 0, 0, 3]} onClick={(d: { name?: string }) => d?.name && d.name !== '其他项目' && onSelect(d.name)} className="cursor-pointer" />
-            <Bar dataKey="零转化消耗" stackId="a" fill={C_零转化} radius={[0, 3, 3, 0]} onClick={(d: { name?: string }) => d?.name && d.name !== '其他项目' && onSelect(d.name)} className="cursor-pointer">
-              {data.map((d, i) => (
-                <Cell key={i} stroke={selected === d.name ? CHART.brand : 'none'} strokeWidth={selected === d.name ? 2 : 0} />
-              ))}
-            </Bar>
-          </BarChart>
+          <ComposedChart data={chart} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke={CHART.grid} vertical={false} />
+            <XAxis dataKey="时间" tick={AXIS} minTickGap={24} axisLine={false} tickLine={false} />
+            <YAxis yAxisId="L" tick={AXIS} width={48} axisLine={false} tickLine={false} tickFormatter={(v) => main.fmt(v)} />
+            <YAxis yAxisId="R" orientation="right" tick={{ ...AXIS, fill: C_叠加 }} width={44} axisLine={false} tickLine={false} tickFormatter={(v) => over.fmt(v)} />
+            <Tooltip content={<TrendTip mainKey={mainKey} overKey={overKey} mainFmt={main.fmt} overFmt={over.fmt} />} />
+            <Bar yAxisId="L" dataKey="主" fill={C_柱} radius={[3, 3, 0, 0]} maxBarSize={22} name={`每日${mainKey}`} />
+            <Line yAxisId="L" type="monotone" dataKey="均线" stroke={C_均线} strokeWidth={2} dot={false} name="7日均线" />
+            <Line yAxisId="R" type="monotone" dataKey="叠加" stroke={C_叠加} strokeWidth={2} dot={false} connectNulls name={overKey} />
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
+
+      <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
+        <Legend swatch={C_柱}>每日{mainKey}</Legend>
+        <Legend line={C_均线}>7日均线</Legend>
+        <Legend line={C_叠加}>{overKey}</Legend>
+      </div>
+
+      {peak && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-canvas px-3 py-2 text-[12px]">
+          <span className="text-ink font-medium">峰值日 {md(peak.时间)}</span>
+          <span className="text-faint">·</span>
+          <span className="text-muted">消耗 {wan(peak.消耗)}</span>
+          <span className="text-faint">·</span>
+          <span className="text-muted">贡献项目:</span>
+          {peak.贡献.map((c) => (
+            <span key={c.项目} className="text-muted">
+              <span className="text-ink">{c.项目}</span> {pct(c.占比)}
+            </span>
+          ))}
+        </div>
+      )}
     </Card>
   )
 }
-function StructTip({ active, payload }: { active?: boolean; payload?: { payload: { name: string; 消耗: number; 零转化消耗: number; 零转化占比: number | null } }[] }) {
+function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'up' | 'down' }) {
+  const c = tone === 'up' ? 'text-bad' : tone === 'down' ? 'text-ok' : 'text-ink'
+  return (
+    <div className="rounded-xl border border-line bg-white px-3 py-2">
+      <div className="text-[11px] text-muted">{label}</div>
+      <div className={`mt-0.5 text-[20px] leading-tight font-semibold tabular-nums ${c}`}>
+        {value}
+        {tone && <span className="ml-0.5 text-[13px]">{tone === 'up' ? '↑' : '↓'}</span>}
+      </div>
+      {sub && <div className="text-[11px] text-faint">{sub}</div>}
+    </div>
+  )
+}
+function Toggle({ label, value, opts, onChange, accent }: { label: string; value: string; opts: string[]; onChange: (v: string) => void; accent?: 'red' }) {
+  const on = accent === 'red' ? 'bg-red-50 text-[#dc2626] font-medium' : 'bg-brand-soft text-brand font-medium'
+  return (
+    <div className="flex items-center gap-1">
+      <span className="text-faint">{label}</span>
+      {opts.map((o) => (
+        <button key={o} onClick={() => onChange(o)} className={`rounded-md px-2 py-0.5 ${value === o ? on : 'text-muted hover:text-ink'}`}>
+          {o}
+        </button>
+      ))}
+    </div>
+  )
+}
+function Legend({ swatch, line, children }: { swatch?: string; line?: string; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {swatch && <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: swatch }} />}
+      {line && <span className="inline-block h-0.5 w-4 rounded" style={{ background: line }} />}
+      {children}
+    </span>
+  )
+}
+function TrendTip({ active, payload, label, mainKey, overKey, mainFmt, overFmt }: {
+  active?: boolean
+  payload?: { payload: { 主: number; 均线: number; 叠加: number | null } }[]
+  label?: string
+  mainKey: string
+  overKey: string
+  mainFmt: (v: number) => string
+  overFmt: (v: number) => string
+}) {
   if (!active || !payload?.length) return null
   const p = payload[0].payload
   return (
-    <div className="rounded-lg border border-line bg-white p-2 shadow-lg text-[12px]">
-      <div className="font-medium text-ink">{p.name}</div>
-      <div className="text-muted">消耗 {money(p.消耗)}</div>
-      <div className="text-muted">0转化消耗 {money(p.零转化消耗)}({pct(p.零转化占比)})</div>
+    <div className="rounded-lg border border-line bg-white p-2 shadow-lg text-[12px] min-w-[150px]">
+      <div className="font-medium text-ink">{label}</div>
+      <div className="text-muted">每日{mainKey} {mainFmt(p.主)}</div>
+      <div className="text-muted">7日均线 {mainFmt(p.均线)}</div>
+      <div style={{ color: C_叠加 }}>{overKey} {p.叠加 == null ? '—' : overFmt(p.叠加)}</div>
     </div>
   )
 }
 
-// ---------- ③ 流量效率分布(气泡) ----------
-function EfficiencyScatter({ rows, selected, onSelect }: { rows: Proj[]; selected: string | null; onSelect: (p: string) => void }) {
-  const pts = rows.filter((r) => r.消耗 > 0 && (r.点击 ?? 0) > 0 && r.CPC != null && r.CTR != null)
-    .map((r) => ({ name: r.创量项目, x: r.CPC as number, y: (r.CTR as number) * 100, z: r.消耗, 零转化占比: r.零转化占比, 消耗: r.消耗, 展示: r.展示, 点击: r.点击 }))
-  const hasFlow = pts.length > 0
+// ============== ② 项目消耗结构(排行式横条表) ==============
+function SpendStructure({ rows, selected, onSelect }: { rows: Proj[]; selected: string | null; onSelect: (p: string) => void }) {
+  const top = rows.slice(0, 10)
+  const restSpend = rows.slice(10).reduce((s, r) => s + r.消耗, 0)
+  const rest零 = rows.slice(10).reduce((s, r) => s + r.零转化消耗, 0)
+  type LineRow = { name: string; 消耗: number; 零转化消耗: number; 零转化占比: number | null; clickable: boolean }
+  const list: LineRow[] = top.map((r) => ({ name: r.创量项目, 消耗: r.消耗, 零转化消耗: r.零转化消耗, 零转化占比: r.零转化占比, clickable: true }))
+  if (restSpend > 0) list.push({ name: '其他项目', 消耗: restSpend, 零转化消耗: rest零, 零转化占比: div(rest零, restSpend), clickable: false })
+  const maxSpend = list.length ? Math.max(...list.map((r) => r.消耗)) : 1
 
-  if (!hasFlow) {
-    // 降级:0转化消耗占比排行
-    const rank = rows.filter((r) => r.消耗 > 0).slice(0, 12)
+  return (
+    <Card title="项目消耗结构" extra={<span className="text-[12px] text-muted">青=有效消耗 · 红=0转化消耗</span>}>
+      <div className="flex items-center gap-2 pb-1.5 text-[11px] text-faint border-b border-line">
+        <span className="flex-1">项目</span>
+        <span className="w-[34%]">消耗结构</span>
+        <span className="w-20 text-right">总消耗</span>
+        <span className="w-14 text-right">0转化占比</span>
+      </div>
+      <div className="divide-y divide-line/60">
+        {list.map((r) => {
+          const w = (r.消耗 / maxSpend) * 100
+          const zr = r.消耗 ? (r.零转化消耗 / r.消耗) * 100 : 0
+          const active = selected === r.name
+          return (
+            <div
+              key={r.name}
+              onClick={() => r.clickable && onSelect(r.name)}
+              className={`flex items-center gap-2 py-1.5 text-[12px] ${r.clickable ? 'cursor-pointer hover:bg-canvas/60' : ''} ${active ? 'bg-brand-soft/50' : ''}`}
+            >
+              <span className={`flex-1 truncate ${active ? 'text-brand font-medium' : 'text-ink'}`} title={r.name}>{r.name}</span>
+              <span className="w-[34%]">
+                <span className="flex h-3.5 rounded-sm overflow-hidden bg-canvas" style={{ width: `${Math.max(w, 3)}%` }}>
+                  <span className="h-full" style={{ width: `${100 - zr}%`, background: C_有效 }} />
+                  <span className="h-full" style={{ width: `${zr}%`, background: C_零转化 }} />
+                </span>
+              </span>
+              <span className="w-20 text-right tabular-nums text-ink">{wan(r.消耗)}</span>
+              <span className="w-14 text-right tabular-nums" style={{ color: (r.零转化占比 ?? 0) > 0.1 ? '#dc2626' : '#64748b' }}>{pct(r.零转化占比)}</span>
+            </div>
+          )
+        })}
+      </div>
+    </Card>
+  )
+}
+
+// ============== ③ 流量效率定位(CPC × CTR 象限气泡) ==============
+function EfficiencyScatter({ rows, selected, onSelect }: { rows: Proj[]; selected: string | null; onSelect: (p: string) => void }) {
+  const valid = rows.filter((r) => r.点击 > 0 && r.CPC != null && r.CTR != null)
+
+  if (valid.length === 0) {
+    // 降级:无展示/点击 → 0转化占比排行
+    const rank = rows.slice(0, 12)
     return (
-      <Card title="各项目 0转化消耗占比" extra={<span className="text-[12px] text-muted">无展示/点击数据,改看占比</span>}>
+      <Card title="流量效率定位" extra={<span className="text-[12px] text-muted">无展示/点击,改看 0转化占比</span>}>
         <div className="space-y-1.5">
           {rank.map((r) => (
             <button key={r.创量项目} onClick={() => onSelect(r.创量项目)} className="w-full flex items-center gap-2 text-left">
@@ -221,193 +425,254 @@ function EfficiencyScatter({ rows, selected, onSelect }: { rows: Proj[]; selecte
     )
   }
 
-  const xs = pts.map((p) => p.x).sort((a, b) => a - b)
-  const ys = pts.map((p) => p.y).sort((a, b) => a - b)
-  const medX = xs[Math.floor(xs.length / 2)]
-  const medY = ys[Math.floor(ys.length / 2)]
-  const top5 = new Set([...pts].sort((a, b) => b.消耗 - a.消耗).slice(0, 5).map((p) => p.name))
+  // P95 聚焦坐标轴,极端点 clamp 到边缘(真值留 tooltip)
+  const xsAll = valid.map((r) => r.CPC as number).sort((a, b) => a - b)
+  const ysAll = valid.map((r) => (r.CTR as number) * 100).sort((a, b) => a - b)
+  const p95x = quantile(xsAll, 0.95)
+  const p95y = quantile(ysAll, 0.95)
+  const xMax = +(p95x * 1.08).toFixed(2) || 1
+  const yMax = +(p95y * 1.08).toFixed(2) || 1
+  const medX = quantile(xsAll, 0.5)
+  const medY = quantile(ysAll, 0.5)
+
+  const labelSet = new Set([
+    ...[...valid].sort((a, b) => b.消耗 - a.消耗).slice(0, 3).map((r) => r.创量项目),
+    ...[...valid].sort((a, b) => (b.零转化占比 ?? 0) - (a.零转化占比 ?? 0)).slice(0, 3).map((r) => r.创量项目),
+  ])
+  const pts = valid.map((r) => {
+    const rawX = r.CPC as number
+    const rawY = (r.CTR as number) * 100
+    return {
+      name: r.创量项目,
+      x: Math.min(rawX, xMax),
+      y: Math.min(rawY, yMax),
+      z: r.消耗,
+      rawX,
+      rawY,
+      消耗: r.消耗,
+      展示: r.展示,
+      点击: r.点击,
+      零转化占比: r.零转化占比,
+      label: labelSet.has(r.创量项目) ? r.创量项目 : '',
+    }
+  })
+
+  const quad = (x1: number, x2: number, y1: number, y2: number, fill: string, text: string, pos: string) => (
+    <ReferenceArea x1={x1} x2={x2} y1={y1} y2={y2} fill={fill} fillOpacity={1} stroke="none"
+      label={{ value: text, position: pos as 'insideTopLeft', fontSize: 10, fill: '#94a3b8' }} />
+  )
 
   return (
-    <Card title="项目流量效率分布" extra={<span className="text-[12px] text-muted">横=CPC 纵=CTR 气泡=消耗 色=0转化占比</span>}>
+    <Card title="流量效率定位" extra={<span className="text-[12px] text-muted">横=CPC 纵=CTR · 气泡=消耗 · 色=0转化占比</span>}>
       <div className="h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
           <ScatterChart margin={{ top: 12, right: 16, bottom: 16, left: 4 }}>
             <CartesianGrid stroke={CHART.grid} />
-            <XAxis type="number" dataKey="x" name="CPC" tickFormatter={yuan} tick={AXIS} axisLine={false} tickLine={false} />
-            <YAxis type="number" dataKey="y" name="CTR" tickFormatter={(v) => v + '%'} tick={AXIS} width={40} axisLine={false} tickLine={false} />
-            <ZAxis dataKey="z" range={[60, 600]} />
-            <ReferenceLine x={medX} stroke="#e2e8f0" strokeDasharray="4 4" />
-            <ReferenceLine y={medY} stroke="#e2e8f0" strokeDasharray="4 4" />
+            {quad(0, medX, medY, yMax, '#ecfdf5', '低CPC / 高CTR', 'insideTopLeft')}
+            {quad(medX, xMax, medY, yMax, '#eff6ff', '高CPC / 高CTR', 'insideTopRight')}
+            {quad(0, medX, 0, medY, '#f8fafc', '低CPC / 低CTR', 'insideBottomLeft')}
+            {quad(medX, xMax, 0, medY, '#fff1f2', '高CPC / 低CTR', 'insideBottomRight')}
+            <XAxis type="number" dataKey="x" name="CPC" domain={[0, xMax]} tickFormatter={yuan} tick={AXIS} axisLine={false} tickLine={false} />
+            <YAxis type="number" dataKey="y" name="CTR" domain={[0, yMax]} tickFormatter={(v) => v + '%'} tick={AXIS} width={40} axisLine={false} tickLine={false} />
+            <ZAxis dataKey="z" range={[60, 620]} />
+            <ReferenceLine x={medX} stroke="#cbd5e1" strokeDasharray="4 4" />
+            <ReferenceLine y={medY} stroke="#cbd5e1" strokeDasharray="4 4" />
             <Tooltip content={<FlowTip />} cursor={{ strokeDasharray: '3 3' }} />
             <Scatter data={pts} onClick={(pt) => pt?.payload?.name && onSelect(pt.payload.name)} className="cursor-pointer">
               {pts.map((p, i) => (
-                <Cell key={i} fill={C_零转化} fillOpacity={Math.min(0.25 + (p.零转化占比 ?? 0) * 1.4, 0.9)}
-                  stroke={selected === p.name ? CHART.brand : top5.has(p.name) ? '#64748b' : 'none'} strokeWidth={selected === p.name ? 2 : 1} />
+                <Cell key={i} fill={zeroColor(p.零转化占比)} fillOpacity={0.62}
+                  stroke={selected === p.name ? CHART.brand : 'none'} strokeWidth={selected === p.name ? 2 : 0} />
               ))}
+              <LabelList dataKey="label" position="top" style={{ fontSize: 10, fill: '#475569' }} />
             </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
       </div>
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+        <span className="inline-flex items-center gap-2">
+          0转化占比:
+          {[['0-5%', '#10b981'], ['5-10%', '#3b82f6'], ['10-20%', '#f59e0b'], ['20%+', '#ef4444']].map(([t, c]) => (
+            <span key={t} className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full" style={{ background: c }} />{t}</span>
+          ))}
+        </span>
+        <span className="inline-flex items-center gap-1">消耗 <span className="h-1.5 w-1.5 rounded-full bg-faint" /> <span className="h-2.5 w-2.5 rounded-full bg-faint" /> <span className="h-3.5 w-3.5 rounded-full bg-faint" /> 大</span>
+      </div>
     </Card>
   )
 }
-function FlowTip({ active, payload }: { active?: boolean; payload?: { payload: { name: string; 消耗: number; 展示: number; 点击: number; x: number; y: number; 零转化占比: number | null } }[] }) {
+function FlowTip({ active, payload }: { active?: boolean; payload?: { payload: { name: string; 消耗: number; 展示: number; 点击: number; rawX: number; rawY: number; 零转化占比: number | null } }[] }) {
   if (!active || !payload?.length) return null
   const p = payload[0].payload
   return (
     <div className="rounded-lg border border-line bg-white p-2 shadow-lg text-[12px] min-w-[150px]">
       <div className="font-medium text-ink truncate">{p.name}</div>
       <div className="text-muted">消耗 {wan(p.消耗)} · 0转化 {pct(p.零转化占比)}</div>
-      <div className="text-muted">CTR {p.y.toFixed(2)}% · CPC {yuan(p.x)}</div>
+      <div className="text-muted">CTR {p.rawY.toFixed(2)}% · CPC {yuan(p.rawX)}</div>
       <div className="text-muted">展示 {num(p.展示)} · 点击 {num(p.点击)}</div>
     </div>
   )
 }
 
-// ---------- ④ 投放走势 ----------
-function TrendCard({ metrics, metricKey, setMetricKey, overall, selected, hasTrend }: {
-  metrics: Metric[]; metricKey: string; setMetricKey: (k: string) => void; overall: Day[]; selected: string | null; hasTrend: boolean
+// ============== ④ 0转化占比分层(分层卡片 + 区间内项目明细) ==============
+function LayerModule({ buckets, rows, shownBucket, onSelectBucket, onSelectProject }: {
+  buckets: Bucket[]
+  rows: Proj[]
+  shownBucket: string
+  onSelectBucket: (b: string) => void
+  onSelectProject: (p: string) => void
 }) {
-  const { filters } = useFilters()
-  const { data: detail } = useApi<Detail>('projectDetail', { 项目名: selected ?? '', 优化师: filters.优化师, 起始: filters.起始, 截止: filters.截止 })
-  const m = metrics.find((x) => x.key === metricKey) ?? metrics[0]
-  if (!hasTrend) {
-    return <Card title="投放走势"><div className="py-10 text-center text-muted text-[14px]">需上传「按天」报表后查看走势</div></Card>
-  }
-  const projDays = selected ? detail?.days ?? [] : []
-  const projMap = new Map(projDays.map((d) => [d.时间, m.calc(d)]))
-  const data = overall.map((d) => ({ 时间: d.时间, 整盘: m.calc(d), 项目: selected ? (projMap.get(d.时间) ?? null) : undefined }))
+  const byName = new Map(buckets.map((b) => [b.区间, b]))
+  const inBucket = rows.filter((r) => bucketOf(r.零转化占比) === shownBucket).sort((a, b) => b.消耗 - a.消耗)
 
   return (
-    <Card title="投放走势" extra={
-      <div className="flex gap-1">
-        {metrics.map((x) => (
-          <button key={x.key} onClick={() => setMetricKey(x.key)}
-            className={`rounded-md px-2 py-0.5 text-[12px] ${metricKey === x.key ? 'bg-brand-soft text-brand font-medium' : 'text-muted hover:text-ink'}`}>{x.label}</button>
-        ))}
+    <Card title="0转化占比分层" extra={<span className="text-[12px] text-muted">按项目 0转化消耗占比分层 · 默认看影响最大的层级</span>}>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        {BUCKETS.map((b) => {
+          const d = byName.get(b.名) ?? { 区间: b.名, 项目数: 0, 消耗: 0, 零转化消耗: 0 }
+          const rep = rows.filter((r) => bucketOf(r.零转化占比) === b.名).sort((a, b2) => b2.消耗 - a.消耗).slice(0, 2)
+          const active = shownBucket === b.名
+          return (
+            <button
+              key={b.名}
+              onClick={() => onSelectBucket(b.名)}
+              className="text-left rounded-xl border p-3 transition-shadow hover:shadow-sm"
+              style={{ borderColor: active ? b.color : '#eceef2', background: active ? b.soft : '#fff', borderWidth: active ? 2 : 1 }}
+            >
+              <div className="text-[14px] font-semibold" style={{ color: b.color }}>{b.名}</div>
+              <div className="text-[12px] text-muted">{d.项目数} 个项目</div>
+              <div className="mt-1.5 text-[12px] text-ink tabular-nums">消耗 {wan(d.消耗)}</div>
+              <div className="text-[12px] tabular-nums" style={{ color: b.color }}>0转化 {wan(d.零转化消耗)}</div>
+              <div className="mt-1 text-[11px] text-faint truncate" title={rep.map((r) => r.创量项目).join('、')}>
+                {rep.length ? rep.map((r) => r.创量项目).join('、') : '—'}
+              </div>
+            </button>
+          )
+        })}
       </div>
-    }>
-      <div className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={CHART.grid} vertical={false} />
-            <XAxis dataKey="时间" tick={AXIS} minTickGap={28} axisLine={false} tickLine={false} />
-            <YAxis tick={AXIS} width={48} axisLine={false} tickLine={false} tickFormatter={(v) => m.fmt(v)} />
-            <Tooltip formatter={(v) => m.fmt(Number(v))} contentStyle={{ fontSize: 12, borderRadius: 10 }} />
-            <Line type="monotone" dataKey="整盘" stroke={C_整盘} strokeWidth={2} dot={false} name="整盘" connectNulls />
-            {selected && <Line type="monotone" dataKey="项目" stroke={CHART.brand} strokeWidth={2} dot={false} name={selected} connectNulls />}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    </Card>
-  )
-}
 
-// ---------- ⑤ 0转化占比分布 ----------
-function DistributionCard({ buckets }: { buckets: Bucket[] }) {
-  const data = buckets.map((b, i) => ({ ...b, idx: i }))
-  return (
-    <Card title="0转化消耗占比分布" extra={<span className="text-[12px] text-muted">各项目的 0转化消耗占比落在哪个区间</span>}>
-      <div className="h-56">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={CHART.grid} vertical={false} />
-            <XAxis dataKey="区间" tick={AXIS} axisLine={false} tickLine={false} />
-            <YAxis allowDecimals={false} tick={AXIS} width={32} axisLine={false} tickLine={false} />
-            <Tooltip content={<BucketTip />} cursor={{ fill: 'rgba(239,68,68,0.04)' }} />
-            <Bar dataKey="项目数" radius={[4, 4, 0, 0]} maxBarSize={64}>
-              {data.map((_, i) => <Cell key={i} fill={`rgba(239,68,68,${0.25 + i * 0.16})`} />)}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-    </Card>
-  )
-}
-function BucketTip({ active, payload }: { active?: boolean; payload?: { payload: Bucket }[] }) {
-  if (!active || !payload?.length) return null
-  const b = payload[0].payload
-  return (
-    <div className="rounded-lg border border-line bg-white p-2 shadow-lg text-[12px] min-w-[180px]">
-      <div className="font-medium text-ink">0转化占比 {b.区间}</div>
-      <div className="text-muted">{b.项目数} 个项目 · 消耗 {wan(b.消耗)} · 0转化 {wan(b.零转化消耗)}</div>
-      {b.top5.length > 0 && <div className="mt-1 border-t border-line pt-1">
-        {b.top5.map((t) => <div key={t.创量项目} className="flex justify-between gap-3"><span className="truncate">{t.创量项目}</span><span className="text-faint">{pct(t.零转化占比)}</span></div>)}
-      </div>}
-    </div>
-  )
-}
-
-// ---------- ⑥ 项目媒体矩阵 ----------
-function MediaMatrix({ matrix, selected, onSelect }: { matrix: NonNullable<Matrix>; selected: string | null; onSelect: (p: string) => void }) {
-  return (
-    <Card title="项目媒体分布" extra={<span className="text-[12px] text-muted">单元格=消耗 · 越红=0转化占比越高</span>}>
-      <div className="overflow-auto">
-        <table className="text-[12px] border-collapse">
-          <thead>
-            <tr className="text-muted">
-              <th className="text-left font-medium py-1.5 px-2 sticky left-0 bg-white">项目</th>
-              {matrix.媒体列.map((m) => <th key={m} className="text-right font-medium py-1.5 px-2 whitespace-nowrap">{m}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {matrix.rows.map((row) => (
-              <tr key={row.创量项目} onClick={() => onSelect(row.创量项目)}
-                className={`cursor-pointer hover:bg-canvas/60 ${selected === row.创量项目 ? 'ring-1 ring-brand' : ''}`}>
-                <td className="py-1.5 px-2 text-ink sticky left-0 bg-white whitespace-nowrap max-w-[160px] truncate">{row.创量项目}</td>
-                {matrix.媒体列.map((m) => {
-                  const c = row.cells[m]
-                  return (
-                    <td key={m} className="py-1.5 px-2 text-right tabular-nums" style={c ? { background: redBg(c.零转化占比) } : undefined}>
-                      {c ? wan(c.消耗) : <span className="text-faint">—</span>}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mt-4">
+        <div className="mb-1.5 text-[13px] font-medium text-ink">
+          区间内项目明细 <span className="text-faint font-normal">({shownBucket} · {inBucket.length} 个项目)</span>
+        </div>
+        {inBucket.length === 0 ? (
+          <div className="py-6 text-center text-muted text-[13px]">该区间内暂无项目</div>
+        ) : (
+          <div className="overflow-auto" style={{ maxHeight: 240 }}>
+            <table className="w-full text-[12px] border-collapse">
+              <thead className="sticky top-0 bg-white">
+                <tr className="text-faint border-b border-line">
+                  <th className="text-left font-normal py-1.5 px-2 bg-white">项目</th>
+                  <th className="text-right font-normal py-1.5 px-2 bg-white">消耗</th>
+                  <th className="text-right font-normal py-1.5 px-2 bg-white">0转化消耗</th>
+                  <th className="text-right font-normal py-1.5 px-2 bg-white">0转化占比</th>
+                  <th className="text-left font-normal py-1.5 px-2 bg-white">主投媒体</th>
+                </tr>
+              </thead>
+              <tbody>
+                {inBucket.map((r) => (
+                  <tr key={r.创量项目} onClick={() => onSelectProject(r.创量项目)} className="border-b border-line/60 cursor-pointer hover:bg-canvas/60">
+                    <td className="py-1.5 px-2 text-ink">{r.创量项目}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{wan(r.消耗)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{r.零转化消耗 > 0 ? wan(r.零转化消耗) : <span className="text-faint">—</span>}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums" style={{ color: (r.零转化占比 ?? 0) > 0.1 ? '#dc2626' : undefined }}>{pct(r.零转化占比)}</td>
+                    <td className="py-1.5 px-2 text-muted">{r.主投媒体 ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </Card>
   )
 }
 
-// ---------- ⑦ 主表 ----------
-function ProjectTable({ rows, showConv, setShowConv, onSelect, hasTrend }: {
-  rows: Proj[]; showConv: boolean; setShowConv: (b: boolean) => void; onSelect: (p: string) => void; hasTrend: boolean
+// ============== 项目明细表 ==============
+function ProjectTable({ rows, hasTrend, hasMedia, selected, bucketFilter, onSelect, onClear }: {
+  rows: Proj[]
+  hasTrend: boolean
+  hasMedia: boolean
+  selected: string | null
+  bucketFilter: string | null
+  onSelect: (p: string) => void
+  onClear: () => void
 }) {
+  const [showConv, setShowConv] = useState(false)
+  const [search, setSearch] = useState('')
+  const [media, setMedia] = useState('')
+
+  const mediaOpts = useMemo(
+    () => [...new Set(rows.map((r) => r.主投媒体).filter((m): m is string => !!m))].sort(),
+    [rows],
+  )
+
+  const filtered = useMemo(() => {
+    let r = rows
+    if (selected) r = r.filter((x) => x.创量项目 === selected)
+    else if (bucketFilter) r = r.filter((x) => x.消耗 > 0 && bucketOf(x.零转化占比) === bucketFilter)
+    if (search.trim()) r = r.filter((x) => x.创量项目.includes(search.trim()))
+    if (media) r = r.filter((x) => x.主投媒体 === media)
+    return r
+  }, [rows, selected, bucketFilter, search, media])
+
+  const chip = selected ? `项目 = ${selected}` : bucketFilter ? `0转化占比 ${bucketFilter}` : null
+
   const cols: Col<Proj>[] = [
     { key: '创量项目', label: '项目', render: (r) => (
       <span className="flex items-center gap-1.5">
-        <span className="text-ink">{r.创量项目}</span>
+        <span className="text-ink font-medium">{r.创量项目}</span>
         {r.是0转化 && <Tag>0转化</Tag>}
         {r.低样本 && <Tag>低样本</Tag>}
       </span>
     ) },
+    ...(hasMedia ? [{ key: '主投媒体', label: '主投媒体', render: (r: Proj) => <span className="text-muted">{r.主投媒体 ?? '—'}</span> }] : []),
     { key: '消耗', label: '消耗', align: 'right', sortable: true, sortVal: (r) => r.消耗, render: (r) => money(r.消耗) },
-    { key: '占比', label: '占比', align: 'right', sortable: true, sortVal: (r) => r.占比, render: (r) => pct(r.占比) },
+    { key: '占比', label: '消耗占比', align: 'right', sortable: true, sortVal: (r) => r.占比, render: (r) => pct(r.占比) },
     { key: '零转化消耗', label: '0转化消耗', align: 'right', sortable: true, sortVal: (r) => r.零转化消耗, render: (r) => (r.零转化消耗 > 0 ? money(r.零转化消耗) : <span className="text-faint">—</span>) },
     { key: '零转化占比', label: '0转化占比', align: 'right', sortable: true, sortVal: (r) => r.零转化占比 ?? 0, render: (r) => <span style={{ color: (r.零转化占比 ?? 0) > 0.1 ? '#dc2626' : undefined }}>{pct(r.零转化占比)}</span> },
     { key: '展示', label: '展示', align: 'right', sortable: true, sortVal: (r) => r.展示, render: (r) => num(r.展示) },
     { key: '点击', label: '点击', align: 'right', sortable: true, sortVal: (r) => r.点击, render: (r) => num(r.点击) },
-    { key: 'CTR', label: 'CTR', align: 'right', render: (r) => pct(r.CTR, 2) },
-    { key: 'CPC', label: 'CPC', align: 'right', render: (r) => dec(r.CPC) },
+    { key: 'CTR', label: 'CTR', align: 'right', sortable: true, sortVal: (r) => r.CTR ?? 0, render: (r) => pct(r.CTR, 2) },
+    { key: 'CPC', label: 'CPC', align: 'right', sortable: true, sortVal: (r) => r.CPC ?? 0, render: (r) => dec(r.CPC) },
+    { key: '账户数', label: '账户数', align: 'right', sortable: true, sortVal: (r) => r.账户数, render: (r) => num(r.账户数) },
     ...(showConv ? [
       { key: '转化', label: '转化', align: 'right' as const, sortable: true, sortVal: (r: Proj) => r.转化, render: (r: Proj) => num(r.转化) },
       { key: 'CPA', label: 'CPA', align: 'right' as const, render: (r: Proj) => dec(r.CPA, 1) },
       { key: 'CVR', label: 'CVR', align: 'right' as const, render: (r: Proj) => pct(r.CVR, 2) },
     ] : []),
-    { key: '账户数', label: '账户数', align: 'right', sortable: true, sortVal: (r) => r.账户数, render: (r) => num(r.账户数) },
     ...(hasTrend ? [{ key: 'spark', label: '走势', render: (r: Proj) => (r.spark && r.spark.length > 1 ? <div className="w-20"><Sparkline data={r.spark} height={22} /></div> : <span className="text-faint">—</span>) }] : []),
   ]
+
+  const input = 'h-8 rounded-lg border border-line bg-white px-2.5 text-[12px] text-ink outline-none focus:border-brand'
+
   return (
-    <Card title="项目明细" extra={
-      <button onClick={() => setShowConv(!showConv)} className="text-[12px] text-brand hover:underline">
-        {showConv ? '隐藏转化指标' : '显示转化/CPA/CVR'}
-      </button>
-    }>
-      {showConv && <div className="mb-2 text-[12px] text-faint">转化/CPA/CVR 基于各项目当前转化口径计算,不同项目转化目标可能不同,不建议直接横向比较。</div>}
-      <DataTable cols={cols} rows={rows} initialSort={{ key: '消耗', dir: 'desc' }} onRowClick={(r) => onSelect(r.创量项目)} />
+    <Card
+      title="项目明细"
+      extra={
+        <button onClick={() => setShowConv(!showConv)} className="text-[12px] text-brand hover:underline">
+          {showConv ? '隐藏转化指标' : '显示转化/CPA/CVR'}
+        </button>
+      }
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索项目名" className={`${input} w-40`} />
+        {mediaOpts.length > 0 && (
+          <select value={media} onChange={(e) => setMedia(e.target.value)} className={input}>
+            <option value="">全部媒体</option>
+            {mediaOpts.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        )}
+        {chip && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-brand-soft px-2.5 py-1 text-[12px] text-brand">
+            当前筛选:{chip}
+            <button onClick={onClear} className="ml-0.5 text-brand/70 hover:text-brand" title="清除筛选">×</button>
+          </span>
+        )}
+        <span className="ml-auto text-[12px] text-faint">{filtered.length} 个项目</span>
+      </div>
+      {showConv && <div className="mb-2 text-[12px] text-faint">转化/CPA/CVR 按当前数据口径计算,不同优化目标项目之间仅供参考。</div>}
+      <DataTable cols={cols} rows={filtered} initialSort={{ key: '消耗', dir: 'desc' }} onRowClick={(r) => onSelect(r.创量项目)} maxHeight={600} />
+      <p className="mt-2 text-[11px] text-faint">提示:数字按千分位展示;消耗以「万」计;0转化消耗为空显示「—」;账户数为项目下广告账户ID数(含微量/未起量号)。</p>
     </Card>
   )
 }
@@ -415,18 +680,23 @@ function Tag({ children }: { children: React.ReactNode }) {
   return <span className="rounded px-1.5 py-0.5 text-[10px] bg-canvas text-faint">{children}</span>
 }
 
-// ---------- ⑧ 单项目详情抽屉 ----------
+// ============== 右侧抽屉:单项目详情 ==============
 function DetailDrawer({ 项目名, onClose, onDrill }: { 项目名: string; onClose: () => void; onDrill: (p: string) => void }) {
   const { filters } = useFilters()
-  const { data, loading } = useApi<Detail>('projectDetail', { 项目名, 优化师: filters.优化师, 起始: filters.起始, 截止: filters.截止 })
+  const { data, loading } = useApi<DetailT>('projectDetail', { 项目名, 优化师: filters.优化师, 起始: filters.起始, 截止: filters.截止 })
 
-  const DETAIL_METRICS: Metric[] = [
-    ...OVERVIEW_METRICS,
+  const METRICS: { key: string; label: string; calc: (d: DetailT['days'][number]) => number | null; fmt: (v: number) => string }[] = [
+    { key: '消耗', label: '消耗', calc: (d) => d.消耗, fmt: wan },
+    { key: '展示', label: '展示', calc: (d) => d.展示, fmt: num },
+    { key: '点击', label: '点击', calc: (d) => d.点击, fmt: num },
+    { key: 'CTR', label: 'CTR', calc: (d) => { const v = div(d.点击, d.展示); return v == null ? null : v * 100 }, fmt: (v) => v.toFixed(2) + '%' },
+    { key: 'CPC', label: 'CPC', calc: (d) => div(d.消耗, d.点击), fmt: yuan },
+    { key: '0转化占比', label: '0转化占比', calc: (d) => { const v = div(d.零转化消耗, d.消耗); return v == null ? null : v * 100 }, fmt: (v) => v.toFixed(1) + '%' },
     { key: '转化', label: '转化', calc: (d) => d.转化, fmt: num },
     { key: 'CPA', label: 'CPA', calc: (d) => div(d.消耗, d.转化), fmt: yuan },
   ]
   const [mk, setMk] = useState('消耗')
-  const m = DETAIL_METRICS.find((x) => x.key === mk) ?? DETAIL_METRICS[0]
+  const m = METRICS.find((x) => x.key === mk) ?? METRICS[0]
 
   return (
     <>
@@ -438,26 +708,24 @@ function DetailDrawer({ 项目名, onClose, onDrill }: { 项目名: string; onCl
         </div>
         {loading || !data ? <Loading /> : (
           <>
-            {/* 摘要 */}
             <div className="grid grid-cols-3 gap-2 text-[12px]">
               {([['消耗', wan(data.摘要.消耗)], ['0转化占比', pct(data.摘要.零转化占比)], ['账户数', num(data.摘要.账户数)],
                  ['转化', num(data.摘要.转化)], ['CPA', data.摘要.CPA == null ? '—' : yuan(data.摘要.CPA)], ['CTR', pct(data.摘要.CTR, 2)]] as [string, string][]).map(([k, v]) => (
                 <div key={k} className="rounded-lg border border-line p-2"><div className="text-faint">{k}</div><div className="text-ink font-semibold tabular-nums">{v}</div></div>
               ))}
             </div>
-            <div className="text-[11px] text-faint">转化/CPA 基于当前数据口径。</div>
+            <div className="text-[11px] text-faint">转化/CPA 基于当前数据口径,不同优化目标仅供参考。</div>
 
-            {/* 项目趋势 */}
             {data.days.length > 0 && (
               <div>
                 <div className="flex items-center justify-between mb-1"><span className="text-[13px] font-medium text-ink">项目趋势</span>
-                  <div className="flex flex-wrap gap-1">{DETAIL_METRICS.map((x) => (
+                  <div className="flex flex-wrap gap-1">{METRICS.map((x) => (
                     <button key={x.key} onClick={() => setMk(x.key)} className={`rounded px-1.5 py-0.5 text-[11px] ${mk === x.key ? 'bg-brand-soft text-brand' : 'text-muted'}`}>{x.label}</button>
                   ))}</div>
                 </div>
                 <div className="h-44">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={data.days.map((d) => ({ 时间: d.时间, v: m.calc(d) }))} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <LineChart data={data.days.map((d) => ({ 时间: md(d.时间), v: m.calc(d) }))} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                       <CartesianGrid stroke={CHART.grid} vertical={false} />
                       <XAxis dataKey="时间" tick={{ fontSize: 10, fill: CHART.axis }} minTickGap={24} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 10, fill: CHART.axis }} width={44} axisLine={false} tickLine={false} tickFormatter={(v) => m.fmt(v)} />
@@ -469,7 +737,6 @@ function DetailDrawer({ 项目名, onClose, onDrill }: { 项目名: string; onCl
               </div>
             )}
 
-            {/* 账户表现分布 */}
             <div>
               <div className="text-[13px] font-medium text-ink mb-1">账户表现分布</div>
               <div className="flex h-7 rounded-lg overflow-hidden text-[11px] text-white">
@@ -485,7 +752,6 @@ function DetailDrawer({ 项目名, onClose, onDrill }: { 项目名: string; onCl
               </div>
             </div>
 
-            {/* 媒体构成 */}
             {data.媒体构成.length > 0 && (
               <div>
                 <div className="text-[13px] font-medium text-ink mb-1">媒体构成</div>
@@ -498,7 +764,6 @@ function DetailDrawer({ 项目名, onClose, onDrill }: { 项目名: string; onCl
               </div>
             )}
 
-            {/* 转化链路 */}
             {data.链路 ? (
               <div>
                 <div className="text-[13px] font-medium text-ink mb-1">转化链路</div>

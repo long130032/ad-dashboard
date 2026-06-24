@@ -5,7 +5,7 @@ import { getTables } from './store'
 import { byDimension, derive } from './metrics'
 import { classifyAccounts, inferTargets } from './diagnose'
 import { DEFAULTS } from './config'
-import { groupBy, n0, safe, sumCol } from './agg'
+import { groupBy, n0, nunique, safe, sumCol } from './agg'
 
 function pick(r: Row, cols: string[]): Row {
   const o: Row = {}
@@ -186,15 +186,21 @@ function projectRows(acc: Row[], sparks: Map<string, number[]>) {
     const name = String(d['创量项目'])
     const sub = acc.filter((r) => r['创量项目'] === name)
     const 零转化消耗 = zeroConvSpend(sub)
-    const 媒体数 = new Set(
-      sub.map((r) => r['媒体']).filter((m): m is string => typeof m === 'string' && m !== ''),
-    ).size
+    // 主投媒体 = 该项目下消耗最高的媒体(无媒体归属时为 null)
+    const mediaSpend = new Map<string, number>()
+    for (const r of sub) {
+      const m = r['媒体']
+      if (typeof m === 'string' && m !== '') mediaSpend.set(m, (mediaSpend.get(m) ?? 0) + n0(r['消耗']))
+    }
+    const 媒体数 = mediaSpend.size
+    const 主投媒体 = [...mediaSpend.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
     return {
       ...d,
       创量项目: name,
       零转化消耗,
       零转化占比: d.消耗 ? 零转化消耗 / d.消耗 : null,
       媒体数,
+      主投媒体,
       是0转化: d.消耗 > 0 && d.转化 === 0,
       低样本: d.消耗 > 0 && (d.转化 < DEFAULTS.低样本_最小转化 || d.点击 < DEFAULTS.低样本_最小点击),
       spark: sparks.get(name) ?? null,
@@ -238,8 +244,6 @@ export function buildProjects(优化师?: string, 媒体?: string, 起始?: stri
     }
   })
 
-  const matrix = buildMatrix(acc, rows)
-
   const summary = {
     总消耗,
     总零转化消耗,
@@ -252,45 +256,7 @@ export function buildProjects(优化师?: string, 媒体?: string, 起始?: stri
     有媒体: !!getTables()['项目报表'],
     低样本阈值: { 转化: DEFAULTS.低样本_最小转化, 点击: DEFAULTS.低样本_最小点击 },
   }
-  return { rows, summary, buckets, matrix }
-}
-
-/** ⑥ 项目×媒体 矩阵:行=Top20 项目,列=按消耗降序媒体;单元格 消耗/0转化消耗/占比/展示/点击/CTR/CPC。
- *  无「项目报表」(无媒体归属)→ 返回 null。 */
-function buildMatrix(acc: Row[], rows: ReturnType<typeof projectRows>) {
-  if (!getTables()['项目报表']) return null
-  const topProjects = rows.filter((r) => r.消耗 > 0).slice(0, 20).map((r) => r.创量项目)
-  const projSet = new Set(topProjects)
-  const cellMap = new Map<string, Map<string, { 消耗: number; 零转化消耗: number; 展示: number; 点击: number }>>()
-  const mediaSpend = new Map<string, number>()
-  for (const r of acc) {
-    const proj = String(r['创量项目'] ?? '')
-    const media = r['媒体']
-    if (!projSet.has(proj) || typeof media !== 'string' || media === '') continue
-    const 消耗 = n0(r['消耗'])
-    mediaSpend.set(media, (mediaSpend.get(media) ?? 0) + 消耗)
-    let row = cellMap.get(proj)
-    if (!row) { row = new Map(); cellMap.set(proj, row) }
-    const cell = row.get(media) ?? { 消耗: 0, 零转化消耗: 0, 展示: 0, 点击: 0 }
-    cell.消耗 += 消耗
-    if (n0(r['转化数']) === 0) cell.零转化消耗 += 消耗
-    cell.展示 += n0(r['展示数'])
-    cell.点击 += n0(r['点击数'])
-    row.set(media, cell)
-  }
-  const 媒体列 = [...mediaSpend.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m)
-  const mRows = topProjects.map((proj) => {
-    const row = cellMap.get(proj)
-    const cells: Record<string, { 消耗: number; 零转化消耗: number; 零转化占比: number | null; 展示: number; 点击: number; CTR: number | null; CPC: number | null } | null> = {}
-    for (const m of 媒体列) {
-      const c = row?.get(m)
-      cells[m] = c
-        ? { 消耗: c.消耗, 零转化消耗: c.零转化消耗, 零转化占比: c.消耗 ? c.零转化消耗 / c.消耗 : null, 展示: c.展示, 点击: c.点击, CTR: safe(c.点击, c.展示), CPC: safe(c.消耗, c.点击) }
-        : null
-    }
-    return { 创量项目: proj, cells }
-  })
-  return { 媒体列, rows: mRows }
+  return { rows, summary, buckets }
 }
 
 /** ⑧ 单项目详情(抽屉懒加载):摘要 + 逐日走势 + 媒体构成 + 账户表现分布 + 转化链路。 */
@@ -372,15 +338,98 @@ function mode(values: Cell[]): Cell {
   return sorted[0].v
 }
 
-export function buildMedia() {
+/** 媒体分析页。数据源唯一为「项目报表」(账户报表无媒体维度);支持 优化师/项目/媒体 过滤,
+ *  无日期维度(项目报表为整段)。返回:每媒体结构指标 + 全媒体概览 + 同项目媒体对比矩阵。 */
+export function buildMedia(优化师?: string, 项目?: string, 媒体?: string) {
   const 项目报表 = getTables()['项目报表']
-  if (!项目报表) return { rows: [] }
-  return { rows: byDimension(项目报表, '媒体') }
+  if (!项目报表) return { rows: [], 总计: null, 同项目对比: null }
+  const all = filterRows(项目报表, { 优化师, 项目, 媒体 })
+  const 总消耗 = sumCol(all, '消耗')
+  const 账户总数 = nunique(all, '账户ID')
+
+  const rows = groupBy(all, '媒体')
+    .filter(([m]) => typeof m === 'string' && m !== '')
+    .map(([m, g]) => {
+      const 消耗 = sumCol(g, '消耗')
+      const 展示 = sumCol(g, '展示数')
+      const 点击 = sumCol(g, '点击数')
+      const 转化 = sumCol(g, '转化数')
+      const 账户数 = nunique(g, '账户ID')
+      const 零转化消耗 = g.reduce((s, r) => s + (n0(r['转化数']) === 0 ? n0(r['消耗']) : 0), 0)
+      const 占比 = safe(消耗, 总消耗)
+      const 样本状态 =
+        消耗 > 0 && 转化 === 0 ? '无转化' : 账户数 < 5 || (占比 ?? 0) < 0.01 ? '样本较小' : '充足'
+      return {
+        媒体: String(m),
+        消耗,
+        占比: 占比 ?? 0,
+        账户数,
+        账户占比: safe(账户数, 账户总数) ?? 0,
+        单账户消耗: safe(消耗, 账户数),
+        展示,
+        点击,
+        转化,
+        CTR: safe(点击, 展示),
+        CPC: safe(消耗, 点击),
+        CVR: safe(转化, 点击),
+        CPA: safe(消耗, 转化),
+        零转化占比: safe(零转化消耗, 消耗),
+        样本状态,
+      }
+    })
+    .sort((a, b) => b.消耗 - a.消耗)
+
+  const d = derive(all)
+  const 总计 = {
+    总消耗,
+    媒体数: rows.length,
+    账户总数,
+    单账户平均消耗: safe(总消耗, 账户总数),
+    CTR: d.CTR,
+    CPC: d.CPC,
+    CVR: d.CVR,
+    CPA: d.CPA,
+  }
+
+  return { rows, 总计, 同项目对比: sameProjectMedia(all) }
+}
+
+/** ⑤ 同项目媒体对比:只取「同一项目下投了 ≥2 个媒体」的项目,逐项目列出各媒体的 消耗/CPA 等。
+ *  CPA 只在同项目行内可比(跨项目不可比),色阶交给前端按行内相对值上色。 */
+function sameProjectMedia(rows: Row[]) {
+  type Cell = { 消耗: number; CPA: number | null; 账户数: number; CTR: number | null; CPC: number | null; CVR: number | null }
+  const mediaSpend = new Map<string, number>()
+  const out: { 项目: string; 总消耗: number; 主消耗媒体: string; cells: Record<string, Cell> }[] = []
+  for (const [proj, g] of groupBy(rows, '创量项目')) {
+    if (typeof proj !== 'string' || proj === '') continue
+    const mediaGroups = groupBy(g, '媒体').filter(([m]) => typeof m === 'string' && m !== '')
+    if (mediaGroups.length < 2) continue
+    const cells: Record<string, Cell> = {}
+    let 总消耗 = 0
+    let 主消耗媒体 = ''
+    let 主消耗 = -1
+    for (const [m, mg] of mediaGroups) {
+      const name = String(m)
+      const 消耗 = sumCol(mg, '消耗')
+      const 展示 = sumCol(mg, '展示数')
+      const 点击 = sumCol(mg, '点击数')
+      const 转化 = sumCol(mg, '转化数')
+      cells[name] = { 消耗, CPA: safe(消耗, 转化), 账户数: nunique(mg, '账户ID'), CTR: safe(点击, 展示), CPC: safe(消耗, 点击), CVR: safe(转化, 点击) }
+      总消耗 += 消耗
+      mediaSpend.set(name, (mediaSpend.get(name) ?? 0) + 消耗)
+      if (消耗 > 主消耗) { 主消耗 = 消耗; 主消耗媒体 = name }
+    }
+    out.push({ 项目: proj, 总消耗, 主消耗媒体, cells })
+  }
+  if (out.length === 0) return null
+  out.sort((a, b) => b.总消耗 - a.总消耗)
+  const 媒体列 = [...mediaSpend.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m)
+  return { 媒体列, rows: out }
 }
 
 export function buildTrend(优化师?: string, 项目?: string, 起始?: string, 截止?: string) {
   const day = getTables()['账户按天']
-  if (!day) return { rows: [] }
+  if (!day) return { rows: [], 峰值: null }
   let df = filterRows(day, { 优化师, 项目 }) // 按天表无媒体维度,不支持媒体筛选
   if (起始 && 截止) df = df.filter((r) => {
     const t = String(r['时间'] ?? '')
@@ -406,7 +455,23 @@ export function buildTrend(优化师?: string, 项目?: string, 起始?: string,
       }
     })
     .sort((a, b) => String(a.时间).localeCompare(String(b.时间)))
-  return { rows }
+
+  // 峰值日 = 消耗最高的一天;贡献项目 = 当日各项目消耗占比(Top3 + 其他)
+  let 峰值: { 时间: string; 消耗: number; 贡献: { 项目: string; 消耗: number; 占比: number }[] } | null = null
+  if (rows.length > 0) {
+    const top = rows.reduce((a, b) => (b.消耗 > a.消耗 ? b : a))
+    const dayRows = df.filter((r) => String(r['时间'] ?? '') === String(top.时间))
+    const byProj = groupBy(dayRows, '创量项目')
+      .map(([proj, g]) => ({ 项目: String(proj), 消耗: sumCol(g, '消耗') }))
+      .sort((a, b) => b.消耗 - a.消耗)
+    const total = top.消耗 || 1
+    const top3 = byProj.slice(0, 3)
+    const 其他消耗 = byProj.slice(3).reduce((s, p) => s + p.消耗, 0)
+    const 贡献 = top3.map((p) => ({ ...p, 占比: p.消耗 / total }))
+    if (其他消耗 > 0) 贡献.push({ 项目: '其他项目', 消耗: 其他消耗, 占比: 其他消耗 / total })
+    峰值 = { 时间: String(top.时间), 消耗: top.消耗, 贡献 }
+  }
+  return { rows, 峰值 }
 }
 
 export function buildFilters() {

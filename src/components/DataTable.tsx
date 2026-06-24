@@ -14,11 +14,14 @@ export function DataTable<T>({
   rows,
   initialSort,
   onRowClick,
+  maxHeight,
 }: {
   cols: Col<T>[]
   rows: T[]
   initialSort?: { key: string; dir: 'asc' | 'desc' }
   onRowClick?: (r: T) => void
+  /** 设置后:表格区域限高滚动,表头 sticky 吸顶。 */
+  maxHeight?: number
 }) {
   const [sort, setSort] = useState(initialSort)
 
@@ -42,15 +45,15 @@ export function DataTable<T>({
   }
 
   return (
-    <div className="overflow-auto">
+    <div className="overflow-auto" style={maxHeight ? { maxHeight } : undefined}>
       <table className="w-full text-[13px] border-collapse">
-        <thead>
+        <thead className={maxHeight ? 'sticky top-0 z-10 bg-white' : undefined}>
           <tr className="text-muted border-b border-line">
             {cols.map((c) => (
               <th
                 key={c.key}
                 onClick={() => toggle(c)}
-                className={`font-medium py-2 px-3 whitespace-nowrap ${c.align === 'right' ? 'text-right' : 'text-left'} ${
+                className={`font-medium py-2 px-3 whitespace-nowrap ${maxHeight ? 'bg-white' : ''} ${c.align === 'right' ? 'text-right' : 'text-left'} ${
                   c.sortable ? 'cursor-pointer select-none hover:text-ink' : ''
                 }`}
               >
