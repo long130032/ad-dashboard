@@ -24,9 +24,9 @@ type MediaRow = {
   样本状态: string
 }
 type Total = { 总消耗: number; 媒体数: number; 账户总数: number; 单账户平均消耗: number | null; CTR: number | null; CPC: number | null; CVR: number | null; CPA: number | null }
-type CmpCell = { 消耗: number; CPA: number | null; 账户数: number; CTR: number | null; CPC: number | null; CVR: number | null }
-type Cmp = { 媒体列: string[]; rows: { 项目: string; 总消耗: number; 主消耗媒体: string; cells: Record<string, CmpCell> }[] }
-type Resp = { rows: MediaRow[]; 总计: Total | null; 同项目对比: Cmp | null }
+type Ev = { 数: number; 成本: number | null }
+type FunnelRow = { 媒体: string; 消耗: number; 转化: Ev; 激活: Ev; 注册: Ev; 首次付费: Ev; 付费: Ev; 深度转化: Ev }
+type Resp = { rows: MediaRow[]; 总计: Total | null; 深度漏斗: FunnelRow[] | null }
 
 // ---------- 颜色 ----------
 const PALETTE = ['#6d5cf5', '#3b82f6', '#14b8a6', '#f59e0b', '#ec4899']
@@ -41,21 +41,21 @@ const LINK_COLS = [
   { key: 'CPA', name: '单次转化成本', bg: '#fff7ed', color: '#ea580c', fmt: (r: MediaRow) => dec(r.CPA, 1) },
 ] as const
 
-// 同项目 CPA 行内相对色阶:低→绿,高→橙(只在同项目内可比)
-function cpaBg(cpa: number | null, lo: number, hi: number): string | undefined {
-  if (cpa == null || hi <= lo) return undefined
-  const t = Math.min(Math.max((cpa - lo) / (hi - lo), 0), 1)
-  const g = [22, 163, 74]
-  const o = [249, 115, 22]
-  const c = g.map((v, i) => Math.round(v + (o[i] - v) * t))
-  return `rgba(${c[0]},${c[1]},${c[2]},0.16)`
-}
+// 深度漏斗事件列(转化锚点 + 激活/注册/首付/付费/深转),弱背景色
+const FUNNEL_STAGES = [
+  { key: '转化', color: '#2563eb', bg: '#eff6ff' },
+  { key: '激活', color: '#0d9488', bg: '#f0fdfa' },
+  { key: '注册', color: '#7c3aed', bg: '#f5f3ff' },
+  { key: '首次付费', color: '#ea580c', bg: '#fff7ed' },
+  { key: '付费', color: '#dc2626', bg: '#fef2f2' },
+  { key: '深度转化', color: '#64748b', bg: '#f8fafc' },
+] as const
 
 export function Media() {
   const { filters, setFilter } = useFilters()
   const { data, loading } = useApi<Resp>('media', { 优化师: filters.优化师, 项目: filters.项目, 媒体: filters.媒体 })
   if (loading || !data) return <Loading />
-  const { rows, 总计, 同项目对比 } = data
+  const { rows, 总计, 深度漏斗 } = data
   const colorOf = (m: string, i = rows.findIndex((r) => r.媒体 === m)) => FIXED[m] ?? PALETTE[(i < 0 ? 0 : i) % PALETTE.length]
   const toggleMedia = (m: string) => setFilter('媒体', filters.媒体 === m ? undefined : m)
 
@@ -86,8 +86,8 @@ export function Media() {
         <LinkEfficiency rows={rows} colorOf={colorOf} />
       </div>
 
-      {/* ④ 同项目媒体对比 */}
-      <SameProjectCompare cmp={同项目对比} colorOf={colorOf} />
+      {/* ④ 媒体深度漏斗 */}
+      <MediaFunnel funnel={深度漏斗} colorOf={colorOf} />
 
       {/* ⑤ 媒体明细表 */}
       <MediaTable rows={rows} colorOf={colorOf} />
@@ -292,75 +292,56 @@ function LinkEfficiency({ rows, colorOf }: { rows: MediaRow[]; colorOf: (m: stri
   )
 }
 
-// ---------- ④ 同项目媒体对比 ----------
-function SameProjectCompare({ cmp, colorOf }: { cmp: Cmp | null; colorOf: (m: string) => string }) {
-  if (!cmp || cmp.rows.length === 0) {
+// ---------- ④ 媒体深度漏斗 ----------
+function MediaFunnel({ funnel, colorOf }: { funnel: FunnelRow[] | null; colorOf: (m: string) => string }) {
+  if (!funnel || funnel.length === 0) {
     return (
-      <Card title="同项目媒体对比">
-        <div className="py-10 text-center text-muted text-[13px]">当前筛选条件下暂无同项目多媒体投放数据</div>
+      <Card title="媒体深度漏斗">
+        <div className="py-10 text-center text-muted text-[13px]">当前筛选条件下暂无深度转化数据</div>
       </Card>
     )
   }
   return (
     <Card
-      title="同项目媒体对比"
-      extra={<span className="text-[11px] text-faint">仅展示同项目下同时投放多个媒体的数据,避免跨项目直接比较 CPA · 单元格按行内 CPA 上色(绿低橙高)</span>}
+      title="媒体深度漏斗"
+      extra={<span className="text-[11px] text-faint">转化 → 激活 → 注册 → 首次付费 → 付费 → 深度转化(数 / 成本)</span>}
     >
-      <div className="overflow-auto" style={{ maxHeight: 460 }}>
-        <table className="w-full text-[12px] border-collapse">
-          <thead className="sticky top-0 z-10 bg-white">
-            <tr className="text-muted">
-              <th rowSpan={2} className="text-left font-medium py-2 px-2 bg-white border-b border-line">项目</th>
-              <th rowSpan={2} className="text-right font-medium py-2 px-2 bg-white border-b border-line">总消耗</th>
-              <th rowSpan={2} className="text-left font-medium py-2 px-2 bg-white border-b border-line">主消耗媒体</th>
-              {cmp.媒体列.map((m) => (
-                <th key={m} colSpan={2} className="text-center font-medium py-1.5 px-2 bg-white border-b border-line">
-                  <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded" style={{ background: colorOf(m) }} />{m}</span>
+      <div className="text-[11px] text-orange-600 mb-2">⚠ 数据来自账户报表(账户→媒体归属为近似);各账户优化目标不同,成本仅供参考,勿跨平台直接判优劣</div>
+      <div className="overflow-auto">
+        <table className="w-full border-separate" style={{ borderSpacing: '4px' }}>
+          <thead>
+            <tr>
+              <th className="text-left text-[11px] font-medium text-faint px-1">媒体</th>
+              {FUNNEL_STAGES.map((s) => (
+                <th key={s.key} className="rounded-lg px-2 py-1.5 text-center" style={{ background: s.bg }}>
+                  <div className="text-[12px] font-semibold" style={{ color: s.color }}>{s.key}</div>
+                  <div className="text-[10px] text-muted">数 / 成本</div>
                 </th>
-              ))}
-            </tr>
-            <tr className="text-faint">
-              {cmp.媒体列.map((m) => (
-                <Frag key={m}>
-                  <th className="text-right font-normal py-1 px-2 bg-white border-b border-line">消耗</th>
-                  <th className="text-right font-normal py-1 px-2 bg-white border-b border-line">CPA</th>
-                </Frag>
               ))}
             </tr>
           </thead>
           <tbody>
-            {cmp.rows.map((row) => {
-              const cpas = cmp.媒体列.map((m) => row.cells[m]?.CPA).filter((v): v is number => v != null)
-              const lo = Math.min(...cpas)
-              const hi = Math.max(...cpas)
-              return (
-                <tr key={row.项目} className="border-b border-line/60 hover:bg-canvas/40">
-                  <td className="py-1.5 px-2 text-ink whitespace-nowrap max-w-[180px] truncate" title={row.项目}>{row.项目}</td>
-                  <td className="py-1.5 px-2 text-right tabular-nums text-ink">{money(row.总消耗)}</td>
-                  <td className="py-1.5 px-2"><span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]" style={{ background: colorOf(row.主消耗媒体) + '22', color: colorOf(row.主消耗媒体) }}>{row.主消耗媒体}</span></td>
-                  {cmp.媒体列.map((m) => {
-                    const c = row.cells[m]
-                    return (
-                      <Frag key={m}>
-                        <td className="py-1.5 px-2 text-right tabular-nums text-muted">{c ? money(c.消耗) : <span className="text-faint">—</span>}</td>
-                        <td className="py-1.5 px-2 text-right tabular-nums text-ink rounded" style={c ? { background: cpaBg(c.CPA, lo, hi) } : undefined}
-                          title={c ? `账户数 ${c.账户数} · CTR ${pct(c.CTR, 2)} · CPC ${yuan(c.CPC)} · CVR ${pct(c.CVR, 2)}` : undefined}>
-                          {c ? dec(c.CPA, 1) : <span className="text-faint">—</span>}
-                        </td>
-                      </Frag>
-                    )
-                  })}
-                </tr>
-              )
-            })}
+            {funnel.map((r) => (
+              <tr key={r.媒体}>
+                <td className="px-1 text-[12px] text-ink whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded" style={{ background: colorOf(r.媒体) }} />{r.媒体}</span>
+                </td>
+                {FUNNEL_STAGES.map((s) => {
+                  const ev = r[s.key as '激活']
+                  return (
+                    <td key={s.key} className="rounded-lg px-2 py-1.5 text-center align-top" style={{ background: s.bg }}>
+                      <div className="text-[15px] font-semibold tabular-nums" style={{ color: s.color }}>{ev.数 > 0 ? num(ev.数) : <span className="text-faint">—</span>}</div>
+                      <div className="text-[10px] text-muted tabular-nums">{ev.成本 == null ? '—' : yuan(ev.成本)}</div>
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
     </Card>
   )
-}
-function Frag({ children }: { children: React.ReactNode }) {
-  return <>{children}</>
 }
 
 // ---------- ⑤ 媒体明细表 ----------

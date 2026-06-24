@@ -391,40 +391,33 @@ export function buildMedia(优化师?: string, 项目?: string, 媒体?: string)
     CPA: d.CPA,
   }
 
-  return { rows, 总计, 同项目对比: sameProjectMedia(all) }
+  return { rows, 总计, 深度漏斗: mediaFunnel(优化师, 项目, 媒体) }
 }
 
-/** ⑤ 同项目媒体对比:只取「同一项目下投了 ≥2 个媒体」的项目,逐项目列出各媒体的 消耗/CPA 等。
- *  CPA 只在同项目行内可比(跨项目不可比),色阶交给前端按行内相对值上色。 */
-function sameProjectMedia(rows: Row[]) {
-  type Cell = { 消耗: number; CPA: number | null; 账户数: number; CTR: number | null; CPC: number | null; CVR: number | null }
-  const mediaSpend = new Map<string, number>()
-  const out: { 项目: string; 总消耗: number; 主消耗媒体: string; cells: Record<string, Cell> }[] = []
-  for (const [proj, g] of groupBy(rows, '创量项目')) {
-    if (typeof proj !== 'string' || proj === '') continue
-    const mediaGroups = groupBy(g, '媒体').filter(([m]) => typeof m === 'string' && m !== '')
-    if (mediaGroups.length < 2) continue
-    const cells: Record<string, Cell> = {}
-    let 总消耗 = 0
-    let 主消耗媒体 = ''
-    let 主消耗 = -1
-    for (const [m, mg] of mediaGroups) {
-      const name = String(m)
-      const 消耗 = sumCol(mg, '消耗')
-      const 展示 = sumCol(mg, '展示数')
-      const 点击 = sumCol(mg, '点击数')
-      const 转化 = sumCol(mg, '转化数')
-      cells[name] = { 消耗, CPA: safe(消耗, 转化), 账户数: nunique(mg, '账户ID'), CTR: safe(点击, 展示), CPC: safe(消耗, 点击), CVR: safe(转化, 点击) }
-      总消耗 += 消耗
-      mediaSpend.set(name, (mediaSpend.get(name) ?? 0) + 消耗)
-      if (消耗 > 主消耗) { 主消耗 = 消耗; 主消耗媒体 = name }
-    }
-    out.push({ 项目: proj, 总消耗, 主消耗媒体, cells })
-  }
-  if (out.length === 0) return null
-  out.sort((a, b) => b.总消耗 - a.总消耗)
-  const 媒体列 = [...mediaSpend.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m)
-  return { 媒体列, rows: out }
+/** ⑤ 媒体深度漏斗:按媒体看 转化→激活→注册→首次付费→付费→深度转化 的「数 + 成本」。
+ *  数据源为账户报表(深度漏斗只在账户报表里),媒体归属来自账户→项目报表 join(近似)。
+ *  成本一律 Σ消耗 ÷ Σ事件数(不取平台预算的逐账户成本)。各账户优化目标不同,成本仅供参考。 */
+function mediaFunnel(优化师?: string, 项目?: string, 媒体?: string) {
+  const acc = filterRows(enrichedAccounts(), { 优化师, 项目, 媒体 })
+  const rows = groupBy(acc, '媒体')
+    .filter(([m]) => typeof m === 'string' && m !== '')
+    .map(([m, g]) => {
+      const 消耗 = sumCol(g, '消耗')
+      const ev = (col: string) => { const 数 = sumCol(g, col); return { 数, 成本: safe(消耗, 数) } }
+      return {
+        媒体: String(m),
+        消耗,
+        转化: ev('转化数'),
+        激活: ev('激活数'),
+        注册: ev('注册数'),
+        首次付费: ev('首次付费数'),
+        付费: ev('付费数'),
+        深度转化: ev('深度转化数'),
+      }
+    })
+    .filter((r) => r.消耗 > 0)
+    .sort((a, b) => b.消耗 - a.消耗)
+  return rows.length ? rows : null
 }
 
 export function buildTrend(优化师?: string, 项目?: string, 起始?: string, 截止?: string) {
